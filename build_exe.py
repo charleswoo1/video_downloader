@@ -41,12 +41,14 @@ def build(onefile: bool = False):
     else:
         print("⚠️ 未找到 FFmpeg，建議打包後手動將 ffmpeg.exe 複製進輸出資料夾。")
 
+    app_name = "SocialVideoDownloader_Standalone" if onefile else "SocialVideoDownloader"
+
     # 基本 PyInstaller 參數
     cmd = [
         sys.executable,
         "-m",
         "PyInstaller",
-        "--name=SocialVideoDownloader",
+        f"--name={app_name}",
         "--noconsole",
         "--clean",
         "--collect-all=customtkinter",
@@ -62,8 +64,6 @@ def build(onefile: bool = False):
         cmd.append("--onefile")
         if ffmpeg_exe and Path(ffmpeg_exe).is_file():
             cmd.append(f"--add-binary={ffmpeg_exe}{os.pathsep}.")
-        if ffprobe_exe and Path(ffprobe_exe).is_file():
-            cmd.append(f"--add-binary={ffprobe_exe}{os.pathsep}.")
     else:
         cmd.append("--onedir")
 
@@ -96,7 +96,7 @@ def build(onefile: bool = False):
         print(f"📁 執行檔位置: {target_app_dir / 'SocialVideoDownloader.exe'}")
     else:
         print(f"\n🎉 單檔 EXE 打包完成！")
-        print(f"📁 執行檔位置: {dist_dir / 'SocialVideoDownloader.exe'}")
+        print(f"📁 執行檔位置: {dist_dir / f'{app_name}.exe'}")
 
     return True
 

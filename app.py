@@ -42,7 +42,8 @@ class VideoDownloaderApp(ctk.CTk):
         self.minsize(800, 700)
 
         # 設定視窗圖示
-        icon_path = Path(__file__).resolve().parent / "assets" / "icon.ico"
+        base_path = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") else Path(__file__).resolve().parent
+        icon_path = base_path / "assets" / "icon.ico"
         if icon_path.is_file():
             try:
                 self.iconbitmap(str(icon_path))

@@ -10,18 +10,24 @@ import yt_dlp
 
 
 def get_ffmpeg_path() -> Optional[str]:
-    """尋找 FFmpeg 可執行檔路徑 (支援打包後的 PyInstaller 暫存目錄與同級 bin 目錄)"""
-    # 1. 檢查 PyInstaller 單檔解壓路徑
+    """尋找 FFmpeg 可執行檔路徑 (支援 PyInstaller 單檔解壓、程式同級目錄、bin 目錄與系統 PATH)"""
+    # 1. 檢查 PyInstaller 單檔臨時解壓目錄
     if hasattr(sys, "_MEIPASS"):
         meipass_ffmpeg = Path(sys._MEIPASS) / "ffmpeg.exe"
         if meipass_ffmpeg.is_file():
             return str(meipass_ffmpeg.parent)
 
-    # 2. 檢查程式所在目錄之 bin/
-    app_dir = Path(__file__).resolve().parent
-    local_bin = app_dir / "bin" / "ffmpeg.exe"
-    if local_bin.is_file():
-        return str(local_bin.parent)
+    # 2. 檢查程式所在目錄 (包含 PyInstaller onedir 模式下的 sys.executable 目錄)
+    base_dirs = []
+    if getattr(sys, "frozen", False):
+        base_dirs.append(Path(sys.executable).resolve().parent)
+    base_dirs.append(Path(__file__).resolve().parent)
+
+    for b in base_dirs:
+        if (b / "ffmpeg.exe").is_file():
+            return str(b)
+        if (b / "bin" / "ffmpeg.exe").is_file():
+            return str(b / "bin")
 
     # 3. 檢查系統 PATH
     which_ffmpeg = shutil.which("ffmpeg")
