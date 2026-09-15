@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.spec
+bin/
+
+# Media Files (Never commit downloaded videos/audios/subtitles)
+*.mp4
+*.m4a
+*.mp3
+*.webm
+*.mkv
+*.wav
+*.flac
+*.srt
+*.vtt
+*.part
+*.ytdl
+字幕/
+
+# Local configuration & secrets
+config.json
+*.cookie
+*.cookies.txt
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Antigravity agents / scratch
+.agents/
+temp_repo/
