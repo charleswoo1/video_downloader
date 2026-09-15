@@ -1,8 +1,10 @@
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -112,7 +114,7 @@ class DownloaderEngine:
                 "supports_quality": True,
                 "icon": "📺",
             }
-        elif "threads.net" in u:
+        elif "threads.net" in u or "threads.com" in u:
             return {
                 "name": "Threads",
                 "color": "#000000",
@@ -170,9 +172,102 @@ class DownloaderEngine:
         elif cs.lower() in ("chrome", "edge", "firefox", "brave", "opera", "safari"):
             opts["cookiesfrombrowser"] = (cs.lower(),)
 
+    def _extract_threads_info(self, url: str) -> Dict[str, Any]:
+        """專用 Threads 解析器：直接從 Meta 網頁結構中提取 MP4 影片串流與中繼資料"""
+        clean_url = url.split("?")[0].rstrip("/")
+        if clean_url.endswith("/media"):
+            clean_url = clean_url[:-6]
+        clean_url = clean_url.replace("threads.com", "threads.net")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Sec-Fetch-Site": "none",
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        req = urllib.request.Request(clean_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            raise RuntimeError(f"連線至 Threads 失敗: {e}")
+
+        # 1. 尋找影片串流 (多層容錯提取)
+        clean_html = html.replace(r"\/", "/")
+        direct_url = None
+
+        # 優先方案 A: 尋找 Meta CDN 的 t16 影片串流 (最穩定)
+        t16_matches = [m for m in re.findall(r'https://[^\s"\'<>]+\.mp4[^\s"\'<>]*', clean_html) if "/t16/" in m]
+        if t16_matches:
+            direct_url = t16_matches[0]
+
+        # 備用方案 B: 從 video_versions 結構提取
+        if not direct_url:
+            vurls = re.findall(r'\"video_versions\":.*?\"url\":\"(https://[^\"]+)\"', clean_html, re.DOTALL)
+            if vurls:
+                direct_url = vurls[0]
+
+        # 備用方案 C: 任何 scontent 或 cdninstagram 的 mp4 串流 (排除 rsrc 靜態檔)
+        if not direct_url:
+            for m in re.findall(r'https://[^\s"\'<>]+\.mp4[^\s"\'<>]*', clean_html):
+                if ("scontent" in m or "cdninstagram" in m) and "rsrc.php" not in m:
+                    direct_url = m
+                    break
+
+        if not direct_url:
+            raise ValueError("此 Threads 貼文中未偵測到任何影片串流或可能已被刪除。")
+
+        # 2. 尋找作者與貼文 ID
+        user_match = re.search(r"/@([A-Za-z0-9_.-]+)", clean_url)
+        username = user_match.group(1) if user_match else "threads_user"
+
+        post_match = re.search(r"/post/([A-Za-z0-9_-]+)", clean_url)
+        post_id = post_match.group(1) if post_match else "post"
+
+        # 3. 尋找內文 / 標題
+        caption_match = re.search(r'\"caption\":\{.*?\"text\":\"([^\"]+)\"', html)
+        caption = caption_match.group(1) if caption_match else f"Threads 影片 (@{username})"
+        try:
+            caption = json.loads(f'"{caption}"')
+        except Exception:
+            pass
+        caption_clean = re.sub(r'[\r\n\t\\/:*?"<>|]+', " ", caption).strip()
+        title = f"Threads - @{username} - {caption_clean[:50]}" if caption_clean else f"Threads_@{username}_{post_id}"
+
+        # 4. 尋找縮圖
+        thumb = None
+        thumb_match = re.search(r'<meta\s+property=[\"\']og:image[\"\']\s+content=[\"\']([^\"\']+)[\"\']', html)
+        if thumb_match:
+            thumb = thumb_match.group(1)
+        else:
+            img_match = re.search(r'\"image_versions2\":\{.*?\"url\":\"([^\"]+)\"', html)
+            if img_match:
+                thumb = img_match.group(1).replace(r"\/", "/")
+
+        return {
+            "id": post_id,
+            "title": title,
+            "uploader": f"@{username}",
+            "duration": None,
+            "duration_str": "短影音",
+            "thumbnail": thumb,
+            "webpage_url": clean_url,
+            "platform": self.detect_platform(url),
+            "available_resolutions": [1080],
+            "available_subtitles": [],
+            "is_direct_stream": True,
+            "direct_video_url": direct_url,
+            "raw_info": {"title": title},
+        }
+
     def extract_info(self, url: str, cookies_browser: Optional[str] = None) -> Dict[str, Any]:
         """抓取影片資訊 (非同步背景執行用)"""
         platform = self.detect_platform(url)
+
+        # 若為 Threads 平台，使用專屬原生解析器
+        if platform.get("name") == "Threads":
+            return self._extract_threads_info(url)
+
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -314,6 +409,16 @@ class DownloaderEngine:
         log(f"🎬 偵測平台: {platform_info['name']} ({platform_info['icon']})")
         log(f"📁 儲存目標: {output_dir}")
 
+        target_dl_url = url
+        custom_title = None
+
+        if platform_info.get("name") == "Threads":
+            log("🧵 正在提取 Threads 高畫質 MP4 影片串流...")
+            t_info = self._extract_threads_info(url)
+            target_dl_url = t_info["direct_video_url"]
+            custom_title = t_info["title"]
+            log(f"✅ 成功獲取串流，標題: {custom_title}")
+
         # 1. 字幕下載階段 (若支援且啟用)
         if download_captions and platform_info.get("has_subtitles", False):
             langs = self.expand_caption_languages(caption_langs or ["zh-TW", "zh", "en"])
@@ -349,7 +454,11 @@ class DownloaderEngine:
                 log(f"⚠️ 字幕下載略過: {e}")
 
         # 2. 視訊或純音訊下載
-        outtmpl = str(output_dir / "%(title)s.%(ext)s")
+        if custom_title:
+            outtmpl = str(output_dir / f"{custom_title}.%(ext)s")
+        else:
+            outtmpl = str(output_dir / "%(title)s.%(ext)s")
+
         common_opts = {
             "outtmpl": outtmpl,
             "windowsfilenames": True,
@@ -367,7 +476,9 @@ class DownloaderEngine:
 
         if mode == "video":
             # 建立格式規格
-            if quality == "best":
+            if platform_info.get("name") == "Threads":
+                fmt = "best"
+            elif quality == "best":
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
             else:
                 fmt = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
@@ -377,14 +488,17 @@ class DownloaderEngine:
 
             log(f"📹 開始下載視訊串流 (畫質規格: {quality})...")
             with yt_dlp.YoutubeDL(common_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get("title", "影片")
+                info = ydl.extract_info(target_dl_url, download=True)
+                title = custom_title or info.get("title", "影片")
                 log(f"✨ 視訊下載並合併完成: {title}")
 
                 # 取得預計輸出路徑
-                expected_video_path = output_dir / f"{ydl.prepare_filename(info)}"
-                if expected_video_path.suffix != ".mp4":
-                    expected_video_path = expected_video_path.with_suffix(".mp4")
+                if custom_title:
+                    expected_video_path = output_dir / f"{custom_title}.mp4"
+                else:
+                    expected_video_path = output_dir / f"{ydl.prepare_filename(info)}"
+                    if expected_video_path.suffix != ".mp4":
+                        expected_video_path = expected_video_path.with_suffix(".mp4")
                 downloaded_file = expected_video_path
 
                 # 若勾選額外抽取音訊
@@ -406,10 +520,13 @@ class DownloaderEngine:
             ]
             log(f"🎵 開始下載音訊並轉檔為 {audio_format.upper()}...")
             with yt_dlp.YoutubeDL(common_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get("title", "音訊")
+                info = ydl.extract_info(target_dl_url, download=True)
+                title = custom_title or info.get("title", "音訊")
                 log(f"✨ 音訊處理完成: {title}")
-                expected_audio = output_dir / f"{Path(ydl.prepare_filename(info)).stem}.{audio_format}"
+                if custom_title:
+                    expected_audio = output_dir / f"{custom_title}.{audio_format}"
+                else:
+                    expected_audio = output_dir / f"{Path(ydl.prepare_filename(info)).stem}.{audio_format}"
                 downloaded_file = expected_audio
 
         log("🎉 所有下載與後製作業均已完成！")
