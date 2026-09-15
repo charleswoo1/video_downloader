@@ -333,7 +333,7 @@ class VideoDownloaderApp(ctk.CTk):
 
         cookie_lbl = ctk.CTkLabel(
             row5,
-            text="🍪 瀏覽器登入憑證 (選用，遇到年齡/會員/私密影片時使用):",
+            text="🍪 登入憑證 (遇年齡/會員/私密影片限制時使用):",
             font=ctk.CTkFont(size=12),
             text_color="#9CA3AF",
         )
@@ -341,13 +341,35 @@ class VideoDownloaderApp(ctk.CTk):
 
         self.cookie_menu = ctk.CTkOptionMenu(
             row5,
-            values=["none", "chrome", "edge", "firefox", "brave"],
-            width=100,
+            values=["none", "cookies.txt (檔案)", "firefox", "chrome", "edge", "brave"],
+            width=145,
             height=28,
-            command=lambda v: self.config.set("browser_cookies", v),
+            command=self._on_cookie_change,
         )
-        self.cookie_menu.set(self.config.get("browser_cookies", "none"))
-        self.cookie_menu.pack(side="left")
+        saved_cookie = self.config.get("browser_cookies", "none")
+        self.cookie_menu.set(saved_cookie)
+        self.cookie_menu.pack(side="left", padx=(0, 6))
+
+        self.cookie_file_btn = ctk.CTkButton(
+            row5,
+            text="📄 選擇 cookies.txt",
+            width=130,
+            height=28,
+            fg_color="#4B5563",
+            hover_color="#374151",
+            command=self._choose_cookie_file,
+        )
+        if saved_cookie == "cookies.txt (檔案)":
+            self.cookie_file_btn.pack(side="left", padx=(0, 6))
+
+        self.cookie_path_lbl = ctk.CTkLabel(
+            row5,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="#10B981",
+        )
+        self.cookie_path_lbl.pack(side="left")
+        self._update_cookie_path_label()
 
         # --- 區塊 4: 底部進度與控制 ---
         self.bottom_frame = ctk.CTkFrame(self, corner_radius=10)
@@ -529,6 +551,61 @@ class VideoDownloaderApp(ctk.CTk):
         else:
             subprocess.run(["xdg-open", str(target)])
 
+    # ==================== Cookie 憑證管理 ====================
+
+    def _on_cookie_change(self, value: str):
+        """當切換 Cookie 選單時動態顯示/隱藏檔案選擇鈕"""
+        self.config.set("browser_cookies", value)
+        if value == "cookies.txt (檔案)":
+            self.cookie_file_btn.pack(side="left", padx=(0, 6), before=self.cookie_path_lbl)
+            current_path = self.config.get("cookie_file_path", "")
+            if not current_path or not Path(current_path).is_file():
+                self._choose_cookie_file()
+            else:
+                self._update_cookie_path_label()
+        else:
+            self.cookie_file_btn.pack_forget()
+            self.cookie_path_lbl.configure(text="")
+
+    def _choose_cookie_file(self):
+        """開啟檔案選擇對話框選取 cookies.txt"""
+        chosen = filedialog.askopenfilename(
+            title="選擇 cookies.txt 檔案",
+            filetypes=[("Text files", "*.txt"), ("Cookie files", "*.cookie"), ("All files", "*.*")],
+        )
+        if chosen:
+            self.config.set("cookie_file_path", chosen)
+            self.config.set("browser_cookies", "cookies.txt (檔案)")
+            self.cookie_menu.set("cookies.txt (檔案)")
+            self._update_cookie_path_label()
+
+    def _update_cookie_path_label(self):
+        """更新憑證路徑提示標籤"""
+        sel = self.cookie_menu.get()
+        if sel == "cookies.txt (檔案)":
+            p = self.config.get("cookie_file_path", "")
+            if p and Path(p).is_file():
+                self.cookie_path_lbl.configure(text=f"✓ 已載入: {Path(p).name}", text_color="#10B981")
+            elif (Path.cwd() / "cookies.txt").is_file():
+                self.cookie_path_lbl.configure(text="✓ 已自動載入同目錄 cookies.txt", text_color="#10B981")
+            else:
+                self.cookie_path_lbl.configure(text="⚠️ 尚未選擇檔案", text_color="#EF4444")
+        else:
+            self.cookie_path_lbl.configure(text="")
+
+    def _get_effective_cookies(self) -> str:
+        """取得最終傳給下載引擎的 Cookie 來源 (瀏覽器名稱或真實檔案路徑)"""
+        sel = self.cookie_menu.get()
+        if sel == "cookies.txt (檔案)":
+            p = self.config.get("cookie_file_path", "")
+            if p and Path(p).is_file():
+                return p
+            local_txt = Path.cwd() / "cookies.txt"
+            if local_txt.is_file():
+                return str(local_txt)
+            return "none"
+        return sel
+
     # ==================== 非同步背景線程：解析 ====================
 
     def _start_analyze_thread(self):
@@ -544,7 +621,7 @@ class VideoDownloaderApp(ctk.CTk):
         threading.Thread(target=self._analyze_worker, args=(url,), daemon=True).start()
 
     def _analyze_worker(self, url: str):
-        cookies = self.cookie_menu.get()
+        cookies = self._get_effective_cookies()
         try:
             info = self.engine.extract_info(url, cookies_browser=cookies)
             self.after(0, self._on_analyze_success, info)
@@ -593,7 +670,16 @@ class VideoDownloaderApp(ctk.CTk):
         self.analyze_btn.configure(state="normal", text="🔍 分析網址")
         self.status_label.configure(text=f"❌ 解析失敗: {err_msg[:40]}...", text_color="#EF4444")
         self.log(f"❌ 解析錯誤: {err_msg}")
-        messagebox.showerror("解析失敗", f"無法讀取影片中繼資料：\n{err_msg}")
+
+        lowered = err_msg.lower()
+        if "could not copy chrome cookie database" in lowered or "permission denied" in lowered or "資料庫被鎖定" in err_msg:
+            msg = "⚠️ 讀取瀏覽器 Cookie 失敗 (資料庫被鎖定)！\n\n原因：Chrome/Edge 瀏覽器正在開啟中，Windows 施加了獨佔鎖定。\n\n建議解決方式：\n1. 請先將 Chrome/Edge 完全關閉後重試。\n2. 或在下方【登入憑證】選擇「cookies.txt (檔案)」匯入，徹底不受瀏覽器開關影響！"
+        elif "no video could be found" in lowered or "tombstone" in lowered:
+            msg = f"無法讀取影片資訊：\n{err_msg}\n\n💡 提示：該推文/貼文受社群平台的「成人/年齡限制 (NSFW)」，需要登入才可觀看。\n請在下方【登入憑證】選擇登入該帳號的瀏覽器 (例如 firefox / chrome)，或匯入 cookies.txt 即可下載！"
+        else:
+            msg = f"無法讀取影片中繼資料：\n{err_msg}"
+
+        messagebox.showerror("解析失敗", msg)
 
     def _load_thumbnail_worker(self, thumb_url: str):
         try:
@@ -641,7 +727,7 @@ class VideoDownloaderApp(ctk.CTk):
 
         keep_audio = self.keep_audio_var.get()
         download_subs = self.sub_var.get()
-        cookies = self.cookie_menu.get()
+        cookies = self._get_effective_cookies()
 
         # 解析字幕偏好
         lang_sel = self.sub_lang_menu.get()
@@ -767,7 +853,14 @@ class VideoDownloaderApp(ctk.CTk):
         self.speed_label.configure(text="")
         self.log(f"\n❌ 下載失敗: {err_msg}")
         if "取消" not in err_msg:
-            messagebox.showerror("下載錯誤", f"影音下載時發生錯誤：\n{err_msg}")
+            lowered = err_msg.lower()
+            if "could not copy chrome cookie database" in lowered or "permission denied" in lowered or "資料庫被鎖定" in err_msg:
+                msg = "⚠️ 讀取瀏覽器 Cookie 失敗 (資料庫被鎖定)！\n\n原因：Chrome/Edge 正在運行中，Windows 施加了獨佔鎖定。\n\n建議解決方式：\n1. 請先完全關閉 Chrome/Edge 瀏覽器後重試。\n2. 或在下方【登入憑證】選擇「cookies.txt (檔案)」匯入！"
+            elif "no video could be found" in lowered or "tombstone" in lowered:
+                msg = f"下載失敗：\n{err_msg}\n\n💡 提示：該影片可能受「成人/年齡限制 (NSFW)」，需要登入。\n請在下方【登入憑證】切換登入該帳號的瀏覽器 (例如 firefox / chrome)，或匯入 cookies.txt！"
+            else:
+                msg = f"影音下載時發生錯誤：\n{err_msg}"
+            messagebox.showerror("下載錯誤", msg)
 
     def _play_downloaded_file(self):
         """呼叫預設播放器播放剛剛下載完成的影音檔案"""

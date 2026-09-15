@@ -134,15 +134,41 @@ class DownloaderEngine:
             }
 
     @staticmethod
-    def format_duration(seconds: Optional[int]) -> str:
-        """將秒數轉為 HH:MM:SS 或 MM:SS"""
-        if not seconds or seconds <= 0:
+    def format_duration(seconds: Any) -> str:
+        """將秒數轉為 HH:MM:SS 或 MM:SS (相容 float 浮點數與 int 整數)"""
+        try:
+            if seconds is None:
+                return "未知長度"
+            sec = int(round(float(seconds)))
+            if sec <= 0:
+                return "未知長度"
+            m, s = divmod(sec, 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            return f"{m:02d}:{s:02d}"
+        except Exception:
             return "未知長度"
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        if h > 0:
-            return f"{h:02d}:{m:02d}:{s:02d}"
-        return f"{m:02d}:{s:02d}"
+
+    @staticmethod
+    def apply_cookie_opts(opts: Dict[str, Any], cookie_source: Optional[str]) -> None:
+        """套用 Cookie 設定 (支援瀏覽器名稱如 chrome/firefox，或 cookies.txt 檔案路徑)"""
+        if not cookie_source or cookie_source.lower() == "none":
+            # 自動檢查當前目錄是否有 cookies.txt
+            local_cookie = Path.cwd() / "cookies.txt"
+            if local_cookie.is_file():
+                opts["cookiefile"] = str(local_cookie)
+            return
+
+        cs = cookie_source.strip()
+        cp = Path(cs)
+        if cp.is_file() or cs.lower().endswith(".txt") or cs.lower().endswith(".cookie"):
+            if cp.is_file():
+                opts["cookiefile"] = str(cp.resolve())
+            else:
+                raise FileNotFoundError(f"找不到指定的 Cookie 檔案: {cs}")
+        elif cs.lower() in ("chrome", "edge", "firefox", "brave", "opera", "safari"):
+            opts["cookiesfrombrowser"] = (cs.lower(),)
 
     def extract_info(self, url: str, cookies_browser: Optional[str] = None) -> Dict[str, Any]:
         """抓取影片資訊 (非同步背景執行用)"""
@@ -154,43 +180,49 @@ class DownloaderEngine:
             "extract_flat": False,
             "js_runtimes": {"node": {}},
         }
-        if cookies_browser and cookies_browser.lower() != "none":
-            opts["cookiesfrombrowser"] = (cookies_browser.lower(),)
+        self.apply_cookie_opts(opts, cookies_browser)
         if self.ffmpeg_dir:
             opts["ffmpeg_location"] = self.ffmpeg_dir
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                raise ValueError("無法解析影片中繼資料")
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            err = str(e)
+            if "could not copy chrome cookie database" in err.lower() or "permission denied" in err.lower():
+                raise RuntimeError("讀取瀏覽器 Cookie 失敗 (資料庫被鎖定)。請先關閉 Chrome/Edge，或改用 cookies.txt 檔案。")
+            raise
 
-            # 處理可能的多格式與解析度
-            formats = info.get("formats", [])
-            heights = set()
-            for f in formats:
-                h = f.get("height")
-                if h and isinstance(h, int) and h >= 240:
-                    heights.add(h)
-            sorted_heights = sorted(list(heights), reverse=True)
+        if not info:
+            raise ValueError("無法解析影片中繼資料")
 
-            # 字幕語言偵測
-            subtitles = list(info.get("subtitles", {}).keys())
-            auto_subs = list(info.get("automatic_captions", {}).keys())
-            all_subs = sorted(list(set(subtitles + auto_subs)))
+        # 處理可能的多格式與解析度
+        formats = info.get("formats", [])
+        heights = set()
+        for f in formats:
+            h = f.get("height")
+            if h and isinstance(h, int) and h >= 240:
+                heights.add(h)
+        sorted_heights = sorted(list(heights), reverse=True)
 
-            return {
-                "id": info.get("id"),
-                "title": info.get("title", "未命名影片"),
-                "uploader": info.get("uploader") or info.get("channel") or "未知作者",
-                "duration": info.get("duration"),
-                "duration_str": self.format_duration(info.get("duration")),
-                "thumbnail": info.get("thumbnail"),
-                "webpage_url": info.get("webpage_url", url),
-                "platform": platform,
-                "available_resolutions": sorted_heights,
-                "available_subtitles": all_subs,
-                "raw_info": info,
-            }
+        # 字幕語言偵測
+        subtitles = list(info.get("subtitles", {}).keys())
+        auto_subs = list(info.get("automatic_captions", {}).keys())
+        all_subs = sorted(list(set(subtitles + auto_subs)))
+
+        return {
+            "id": info.get("id"),
+            "title": info.get("title", "未命名影片"),
+            "uploader": info.get("uploader") or info.get("channel") or "未知作者",
+            "duration": info.get("duration"),
+            "duration_str": self.format_duration(info.get("duration")),
+            "thumbnail": info.get("thumbnail"),
+            "webpage_url": info.get("webpage_url", url),
+            "platform": platform,
+            "available_resolutions": sorted_heights,
+            "available_subtitles": all_subs,
+            "raw_info": info,
+        }
 
     @staticmethod
     def expand_caption_languages(langs: List[str]) -> List[str]:
@@ -305,8 +337,7 @@ class DownloaderEngine:
                     }
                 ],
             }
-            if cookies_browser and cookies_browser.lower() != "none":
-                sub_opts["cookiesfrombrowser"] = (cookies_browser.lower(),)
+            self.apply_cookie_opts(sub_opts, cookies_browser)
             if self.ffmpeg_dir:
                 sub_opts["ffmpeg_location"] = self.ffmpeg_dir
 
@@ -328,8 +359,7 @@ class DownloaderEngine:
             "ignoreerrors": False,
             "js_runtimes": {"node": {}},
         }
-        if cookies_browser and cookies_browser.lower() != "none":
-            common_opts["cookiesfrombrowser"] = (cookies_browser.lower(),)
+        self.apply_cookie_opts(common_opts, cookies_browser)
         if self.ffmpeg_dir:
             common_opts["ffmpeg_location"] = self.ffmpeg_dir
 

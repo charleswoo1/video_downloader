@@ -50,6 +50,7 @@ def build(onefile: bool = False):
         "PyInstaller",
         f"--name={app_name}",
         "--noconsole",
+        "-y",
         "--clean",
         "--collect-all=customtkinter",
         "--collect-all=yt_dlp",

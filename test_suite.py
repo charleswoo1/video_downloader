@@ -34,7 +34,15 @@ class TestVideoDownloader(unittest.TestCase):
     def test_duration_format(self):
         self.assertEqual(DownloaderEngine.format_duration(65), "01:05")
         self.assertEqual(DownloaderEngine.format_duration(3665), "01:01:05")
+        self.assertEqual(DownloaderEngine.format_duration(24.635), "00:25")
+        self.assertEqual(DownloaderEngine.format_duration(30.033), "00:30")
+        self.assertEqual(DownloaderEngine.format_duration(None), "未知長度")
         self.assertEqual(DownloaderEngine.format_duration(0), "未知長度")
+
+    def test_cookie_opts(self):
+        opts = {}
+        DownloaderEngine.apply_cookie_opts(opts, "firefox")
+        self.assertEqual(opts.get("cookiesfrombrowser"), ("firefox",))
 
     def test_ffmpeg_detection(self):
         ffmpeg_dir = get_ffmpeg_path()
