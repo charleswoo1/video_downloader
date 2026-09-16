@@ -1,0 +1,90 @@
+name: Bug report
+description: Report a reproducible problem with the application.
+title: "[Bug] "
+labels:
+  - "bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Never upload cookies.txt, browser cookies, account tokens, credentials, or unredacted private data.
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App version
+      description: Example: v1.0.0
+      placeholder: v1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source_platform
+    attributes:
+      label: Source platform
+      options:
+        - YouTube
+        - Facebook
+        - Instagram
+        - Threads
+        - X (Twitter)
+        - TikTok
+        - Bilibili
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Public test URL
+      description: Only include a URL if it is safe to share publicly.
+      placeholder: https://...
+
+  - type: dropdown
+    id: cookies
+    attributes:
+      label: Were browser cookies used?
+      options:
+        - "No"
+        - "Yes - Chrome"
+        - "Yes - Edge"
+        - "Yes - Firefox"
+        - "Yes - cookies.txt"
+        - "Other / not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Paste URL...
+        2. Click...
+        3. Error appears...
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message / log
+      description: Redact usernames, local paths, cookies, tokens, IDs, and other private information.
+      render: text
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed cookies, tokens, credentials, and other sensitive information from this report.
+          required: true
