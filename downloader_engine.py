@@ -39,6 +39,53 @@ def get_ffmpeg_path() -> Optional[str]:
     return None
 
 
+def get_node_path() -> Optional[str]:
+    """尋找 Node.js 可執行檔路徑 (支援 PyInstaller 單檔/目錄、系統 PATH、WinGet 與 nodejs_wheel)"""
+    # 1. 檢查 PyInstaller 單檔臨時解壓目錄
+    if hasattr(sys, "_MEIPASS"):
+        for p in [Path(sys._MEIPASS) / "bin" / "node.exe", Path(sys._MEIPASS) / "node.exe"]:
+            if p.is_file():
+                return str(p)
+
+    # 2. 檢查程式所在目錄 (包含 PyInstaller onedir 模式下的 sys.executable 目錄)
+    base_dirs = []
+    if getattr(sys, "frozen", False):
+        base_dirs.append(Path(sys.executable).resolve().parent)
+    base_dirs.append(Path(__file__).resolve().parent)
+
+    for b in base_dirs:
+        for p in [b / "node.exe", b / "bin" / "node.exe"]:
+            if p.is_file():
+                return str(p)
+
+    # 3. 檢查系統 PATH
+    which_node = shutil.which("node")
+    if which_node and Path(which_node).is_file():
+        return str(which_node)
+
+    # 4. 檢查 Python 套件 nodejs_wheel
+    try:
+        import nodejs_wheel.executable as ne
+        candidate = Path(ne.ROOT_DIR) / "node.exe"
+        if candidate.is_file():
+            return str(candidate)
+    except Exception:
+        pass
+
+    # 5. 搜尋使用者 winget 預設路徑
+    winget_base = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+    for p in winget_base.glob("**/node.exe"):
+        if p.is_file():
+            return str(p)
+
+    # 6. 常見安裝路徑
+    for p in [Path("C:/Program Files/nodejs/node.exe"), Path("C:/Program Files (x86)/nodejs/node.exe")]:
+        if p.is_file():
+            return str(p)
+
+    return None
+
+
 class DownloaderEngine:
     """多平台社群影音下載核心引擎"""
 
@@ -260,6 +307,15 @@ class DownloaderEngine:
             "raw_info": {"title": title},
         }
 
+    def _apply_js_runtime_opts(self, opts: Dict[str, Any]) -> None:
+        """配置 JavaScript Runtime 與 EJS Remote Components 以解構 YouTube 簽名與 n-challenge"""
+        node_bin = get_node_path()
+        if node_bin:
+            opts["js_runtimes"] = {"node": {"path": node_bin}}
+        else:
+            opts["js_runtimes"] = {"node": {}}
+        opts["remote_components"] = ["ejs:github"]
+
     def extract_info(self, url: str, cookies_browser: Optional[str] = None) -> Dict[str, Any]:
         """抓取影片資訊 (非同步背景執行用)"""
         platform = self.detect_platform(url)
@@ -273,8 +329,8 @@ class DownloaderEngine:
             "no_warnings": True,
             "skip_download": True,
             "extract_flat": False,
-            "js_runtimes": {"node": {}},
         }
+        self._apply_js_runtime_opts(opts)
         self.apply_cookie_opts(opts, cookies_browser)
         if self.ffmpeg_dir:
             opts["ffmpeg_location"] = self.ffmpeg_dir
@@ -286,7 +342,19 @@ class DownloaderEngine:
             err = str(e)
             if "could not copy chrome cookie database" in err.lower() or "permission denied" in err.lower():
                 raise RuntimeError("讀取瀏覽器 Cookie 失敗 (資料庫被鎖定)。請先關閉 Chrome/Edge，或改用 cookies.txt 檔案。")
-            raise
+
+            # 若使用 Cookie 時遭遇 Requested format is not available，自動嘗試無 Cookie 回退
+            if cookies_browser and cookies_browser != "none" and "requested format is not available" in err.lower():
+                fallback_opts = opts.copy()
+                fallback_opts.pop("cookiefile", None)
+                fallback_opts.pop("cookiesfrombrowser", None)
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                        info = ydl_fb.extract_info(url, download=False)
+                except Exception:
+                    raise e
+            else:
+                raise
 
         if not info:
             raise ValueError("無法解析影片中繼資料")
@@ -433,7 +501,6 @@ class DownloaderEngine:
                 "writesubtitles": True,
                 "writeautomaticsub": True,
                 "subtitleslangs": langs,
-                "js_runtimes": {"node": {}},
                 "postprocessors": [
                     {
                         "key": "FFmpegSubtitlesConvertor",
@@ -442,6 +509,7 @@ class DownloaderEngine:
                     }
                 ],
             }
+            self._apply_js_runtime_opts(sub_opts)
             self.apply_cookie_opts(sub_opts, cookies_browser)
             if self.ffmpeg_dir:
                 sub_opts["ffmpeg_location"] = self.ffmpeg_dir
@@ -466,8 +534,8 @@ class DownloaderEngine:
             "quiet": True,
             "no_warnings": False,
             "ignoreerrors": False,
-            "js_runtimes": {"node": {}},
         }
+        self._apply_js_runtime_opts(common_opts)
         self.apply_cookie_opts(common_opts, cookies_browser)
         if self.ffmpeg_dir:
             common_opts["ffmpeg_location"] = self.ffmpeg_dir
@@ -487,26 +555,38 @@ class DownloaderEngine:
             common_opts["merge_output_format"] = "mp4"
 
             log(f"📹 開始下載視訊串流 (畫質規格: {quality})...")
-            with yt_dlp.YoutubeDL(common_opts) as ydl:
-                info = ydl.extract_info(target_dl_url, download=True)
-                title = custom_title or info.get("title", "影片")
-                log(f"✨ 視訊下載並合併完成: {title}")
-
-                # 取得預計輸出路徑
-                if custom_title:
-                    expected_video_path = output_dir / f"{custom_title}.mp4"
+            try:
+                with yt_dlp.YoutubeDL(common_opts) as ydl:
+                    info = ydl.extract_info(target_dl_url, download=True)
+            except Exception as e:
+                err = str(e)
+                if cookies_browser and cookies_browser != "none" and "requested format is not available" in err.lower():
+                    log("⚠️ 偵測到 Cookie 導致串流格式受限，自動切換至一般串流模式重試下載...")
+                    fb_opts = common_opts.copy()
+                    fb_opts.pop("cookiefile", None)
+                    fb_opts.pop("cookiesfrombrowser", None)
+                    with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+                        info = ydl_fb.extract_info(target_dl_url, download=True)
                 else:
-                    expected_video_path = output_dir / f"{ydl.prepare_filename(info)}"
-                    if expected_video_path.suffix != ".mp4":
-                        expected_video_path = expected_video_path.with_suffix(".mp4")
-                downloaded_file = expected_video_path
+                    raise
+            title = custom_title or info.get("title", "影片")
+            log(f"✨ 視訊下載並合併完成: {title}")
 
-                # 若勾選額外抽取音訊
-                if keep_audio and expected_video_path.is_file():
-                    log(f"🎵 正在從 MP4 抽取獨立音訊檔 ({audio_format.upper()})...")
-                    audio_res = self.extract_audio_from_file(expected_video_path, audio_format)
-                    if audio_res:
-                        log(f"✅ 獨立音訊檔已產出: {audio_res.name}")
+            # 取得預計輸出路徑
+            if custom_title:
+                expected_video_path = output_dir / f"{custom_title}.mp4"
+            else:
+                expected_video_path = output_dir / f"{ydl.prepare_filename(info)}"
+                if expected_video_path.suffix != ".mp4":
+                    expected_video_path = expected_video_path.with_suffix(".mp4")
+            downloaded_file = expected_video_path
+
+            # 若勾選額外抽取音訊
+            if keep_audio and expected_video_path.is_file():
+                log(f"🎵 正在從 MP4 抽取獨立音訊檔 ({audio_format.upper()})...")
+                audio_res = self.extract_audio_from_file(expected_video_path, audio_format)
+                if audio_res:
+                    log(f"✅ 獨立音訊檔已產出: {audio_res.name}")
 
         else:
             # 純音訊模式
@@ -519,15 +599,27 @@ class DownloaderEngine:
                 }
             ]
             log(f"🎵 開始下載音訊並轉檔為 {audio_format.upper()}...")
-            with yt_dlp.YoutubeDL(common_opts) as ydl:
-                info = ydl.extract_info(target_dl_url, download=True)
-                title = custom_title or info.get("title", "音訊")
-                log(f"✨ 音訊處理完成: {title}")
-                if custom_title:
-                    expected_audio = output_dir / f"{custom_title}.{audio_format}"
+            try:
+                with yt_dlp.YoutubeDL(common_opts) as ydl:
+                    info = ydl.extract_info(target_dl_url, download=True)
+            except Exception as e:
+                err = str(e)
+                if cookies_browser and cookies_browser != "none" and "requested format is not available" in err.lower():
+                    log("⚠️ 偵測到 Cookie 導致串流格式受限，自動切換至一般串流模式重試下載...")
+                    fb_opts = common_opts.copy()
+                    fb_opts.pop("cookiefile", None)
+                    fb_opts.pop("cookiesfrombrowser", None)
+                    with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+                        info = ydl_fb.extract_info(target_dl_url, download=True)
                 else:
-                    expected_audio = output_dir / f"{Path(ydl.prepare_filename(info)).stem}.{audio_format}"
-                downloaded_file = expected_audio
+                    raise
+            title = custom_title or info.get("title", "音訊")
+            log(f"✨ 音訊處理完成: {title}")
+            if custom_title:
+                expected_audio = output_dir / f"{custom_title}.{audio_format}"
+            else:
+                expected_audio = output_dir / f"{Path(ydl.prepare_filename(info)).stem}.{audio_format}"
+            downloaded_file = expected_audio
 
         log("🎉 所有下載與後製作業均已完成！")
         return {

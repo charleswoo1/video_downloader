@@ -101,7 +101,7 @@ class VideoDownloaderApp(ctk.CTk):
 
         url_title = ctk.CTkLabel(
             self.url_frame,
-            text="🔗 影片網址 (支援 YouTube / Facebook / Instagram / X / TikTok / Bilibili 等)",
+            text="🔗 影片網址 (支援 YouTube / Facebook / Instagram / Threads / X / TikTok / Bilibili 等)",
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         url_title.pack(anchor="w", padx=14, pady=(10, 4))
@@ -111,7 +111,7 @@ class VideoDownloaderApp(ctk.CTk):
 
         self.url_entry = ctk.CTkEntry(
             url_input_box,
-            placeholder_text="在此貼上影片連結 (例如: https://www.youtube.com/watch?v=... 或 FB/IG/X)",
+            placeholder_text="在此貼上影片連結 (例如: YouTube / FB / IG / Threads / X / TikTok 等)",
             height=38,
             font=ctk.CTkFont(size=13),
         )

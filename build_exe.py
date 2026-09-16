@@ -29,6 +29,25 @@ def find_ffmpeg_binaries():
     return ffmpeg_path, ffprobe_path
 
 
+def find_node_binary():
+    """尋找本機 node.exe"""
+    node_path = shutil.which("node")
+    if not node_path:
+        winget_base = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+        for p in winget_base.glob("**/node.exe"):
+            node_path = str(p)
+            break
+    if not node_path:
+        try:
+            import nodejs_wheel.executable as ne
+            candidate = Path(ne.ROOT_DIR) / "node.exe"
+            if candidate.is_file():
+                node_path = str(candidate)
+        except Exception:
+            pass
+    return node_path
+
+
 def build(onefile: bool = False):
     print("==================================================")
     print("🔨 開始進行多平台社群影片下載器 本地 EXE 打包")
@@ -45,6 +64,12 @@ def build(onefile: bool = False):
         print(f"🎬 尋獲 FFmpeg: {ffmpeg_exe}")
     else:
         print("⚠️ 未找到 FFmpeg，建議打包後手動將 ffmpeg.exe 複製進輸出資料夾。")
+
+    node_exe = find_node_binary()
+    if node_exe:
+        print(f"⚡ 尋獲 Node.js: {node_exe}")
+    else:
+        print("ℹ️ 未找到本地獨立 Node.js，將依賴系統預設環境。")
 
     app_name = "SocialVideoDownloader_Standalone" if onefile else "SocialVideoDownloader"
 
@@ -70,6 +95,8 @@ def build(onefile: bool = False):
         cmd.append("--onefile")
         if ffmpeg_exe and Path(ffmpeg_exe).is_file():
             cmd.append(f"--add-binary={ffmpeg_exe}{os.pathsep}.")
+        if node_exe and Path(node_exe).is_file():
+            cmd.append(f"--add-binary={node_exe}{os.pathsep}bin")
     else:
         cmd.append("--onedir")
 
@@ -85,7 +112,7 @@ def build(onefile: bool = False):
 
     print("\n✅ PyInstaller 主程式編譯完成！")
 
-    # 若是 onedir 模式，將 ffmpeg 與 ffprobe 複製進輸出目錄
+    # 若是 onedir 模式，將 ffmpeg 與 ffprobe 以及 node 複製進輸出目錄
     if not onefile:
         target_app_dir = dist_dir / "SocialVideoDownloader"
         bin_dir = target_app_dir / "bin"
@@ -97,6 +124,9 @@ def build(onefile: bool = False):
         if ffprobe_exe and Path(ffprobe_exe).is_file():
             shutil.copy2(ffprobe_exe, bin_dir / "ffprobe.exe")
             print(f"📋 已隨附複製: {bin_dir / 'ffprobe.exe'}")
+        if node_exe and Path(node_exe).is_file():
+            shutil.copy2(node_exe, bin_dir / "node.exe")
+            print(f"📋 已隨附複製: {bin_dir / 'node.exe'}")
 
         print(f"\n🎉 免安裝綠色版本打包完成！")
         print(f"📁 執行檔位置: {target_app_dir / 'SocialVideoDownloader.exe'}")
