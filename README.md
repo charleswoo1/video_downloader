@@ -150,7 +150,7 @@ python build_exe.py --onefile
 - Push 到 `main`
 - 對 `main` 建立或更新 Pull Request
 
-CI 會安裝依賴、確認 Node.js / FFmpeg 環境並執行 `test_suite.py`。
+CI 會安裝依賴、確認 Node.js / FFmpeg 環境、執行 `test_suite.py`，並做一次單檔 EXE 打包 smoke test。
 
 ### 自動建立 GitHub Release
 
