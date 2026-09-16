@@ -53,7 +53,7 @@ class ConfigManager:
             merged.update(data)
             return merged
         except Exception as e:
-            print(f"[Config] 讀取設定檔失敗 ({path})，將使用預設值: {e}")
+            print(f"[Config] Failed to read config ({path}); using defaults: {e}")
             return None
 
     def load_config(self) -> Dict[str, Any]:
@@ -69,7 +69,7 @@ class ConfigManager:
             if loaded is not None:
                 self.config = loaded
                 self.save_config()
-                print(f"[Config] 已將舊設定搬移至: {self.config_path}")
+                print(f"[Config] Migrated legacy config to: {self.config_path}")
                 return loaded
 
         self.config = self.defaults.copy()
@@ -84,7 +84,7 @@ class ConfigManager:
             with self.config_path.open("w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"[Config] 儲存設定檔失敗: {e}")
+            print(f"[Config] Failed to save config: {e}")
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.config.get(key, self.defaults.get(key, default))
