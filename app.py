@@ -14,6 +14,7 @@ from PIL import Image
 
 from config_manager import ConfigManager
 from downloader_engine import DownloaderEngine, get_ffmpeg_path
+from version import __version__
 
 # 設置 Windows UTF-8
 if sys.platform == "win32":
@@ -37,7 +38,7 @@ class VideoDownloaderApp(ctk.CTk):
         # 視窗外觀與尺寸
         ctk.set_appearance_mode(self.config.get("theme", "Dark"))
         ctk.set_default_color_theme("blue")
-        self.title("多平台社群影音下載器 v1.0")
+        self.title(f"多平台社群影音下載器 v{__version__}")
         self.geometry("860x780")
         self.minsize(800, 700)
 
