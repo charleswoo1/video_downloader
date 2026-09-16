@@ -16,7 +16,7 @@
 
 [下載最新版本 SocialVideoDownloader_Standalone.exe](https://github.com/charleswoo1/video_downloader/releases/latest/download/SocialVideoDownloader_Standalone.exe)
 
-也可以前往 [Releases](https://github.com/charleswoo1/video_downloader/releases) 查看歷史版本、更新說明與 SHA-256 驗證碼。
+也可以前往 [Releases](https://github.com/charleswoo1/video_downloader/releases) 查看歷史版本、更新說明與 SHA-256 驗證碼。新版 Release 也會附上 `BUILD-METADATA.txt`，記錄實際建置版本與 commit。
 
 ### Windows SmartScreen 提示
 
@@ -32,7 +32,7 @@
 - 可下載支援平台提供的字幕並轉成 SRT。
 - 可選擇瀏覽器 Cookie，處理需要登入才能存取的內容。
 - 深色 / 淺色介面。
-- Windows Release 單檔版會隨附 FFmpeg、FFprobe 與 Node.js，不需要另外安裝執行環境。
+- Windows Release 單檔版會隨附 FFmpeg、FFprobe 與 Node.js，不需要另外安裝執行環境。\n- 應用程式設定儲存在 `%LOCALAPPDATA%\\SocialVideoDownloader\\config.json`；舊版工作目錄中的 `config.json` 會在首次啟動時自動搬移。
 
 ## 支援概況
 
@@ -128,7 +128,7 @@ python build_exe.py --onefile
 dist/SocialVideoDownloader_Standalone.exe
 ```
 
-打包程式會嘗試尋找本機的 FFmpeg、FFprobe 與 Node.js。若要明確指定 FFmpeg 所在目錄：
+一般開發使用 `requirements.txt`；正式 Release 則使用 `requirements-release.txt` 的固定版本，以降低同一版本在不同時間重建時產生差異的風險。\n\n打包程式會嘗試尋找本機的 FFmpeg、FFprobe 與 Node.js。若要明確指定 FFmpeg 所在目錄：
 
 ```powershell
 $env:FFMPEG_BIN_DIR = "C:\path\to\ffmpeg\bin"
@@ -150,7 +150,7 @@ python build_exe.py --onefile
 - Push 到 `main`
 - 對 `main` 建立或更新 Pull Request
 
-CI 會安裝依賴、確認 Node.js / FFmpeg 環境、執行 `test_suite.py`，並做一次單檔 EXE 打包 smoke test。
+CI 會使用固定的 Python / Node.js / FFmpeg 與 `requirements-release.txt`、執行 `test_suite.py`，並做一次單檔 EXE 打包 smoke test。GitHub 官方 Actions 也以完整 commit SHA 固定，並交由 Dependabot追蹤更新。
 
 ### 自動建立 GitHub Release
 
@@ -175,7 +175,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-任何 `v*` tag 都會啟動 Release workflow；正式版本建議使用 SemVer，例如 `v1.0.0`、`v1.1.0`。
+任何 `v*` tag 都會啟動 Release workflow；正式版本使用 SemVer。建立 tag 前必須先把 `version.py` 更新成相同版本，例如 `__version__ = "1.0.1"` 對應 `v1.0.1`。已發布的版本不可覆寫或重用。
 
 #### 方法 B：GitHub 網頁手動發佈
 
@@ -255,4 +255,4 @@ git push origin v1.0.0
 
 本工具僅應用於你有權下載、備份或處理的內容。請遵守來源網站服務條款、著作權法規與所在地法律。
 
-目前 repository 尚未附加獨立 `LICENSE` 檔案；**公開可見不等同於授權任意修改或再散布原始碼**。若本專案之後要正式接受外部貢獻或允許再散布，建議另行加入明確的開源授權。
+目前 repository 尚未附加獨立 `LICENSE` 檔案；**公開可見不等同於授權任意修改或再散布原始碼**。第三方元件與目前 Windows Release 打包內容請參閱 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。若本專案之後要正式採用開源授權，應再加入明確的專案 `LICENSE`。
