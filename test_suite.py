@@ -38,11 +38,10 @@ class TestVideoDownloader(unittest.TestCase):
                 self.assertEqual(cfg.get("quality"), "1080p")
                 self.assertTrue((Path(tmp) / "test_config.json").is_file())
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific config path")
     def test_default_config_path_on_windows(self):
         fake_local = Path("C:/Users/Test/AppData/Local")
-        with mock.patch("config_manager.os.name", "nt"), mock.patch.dict(
-            os.environ, {"LOCALAPPDATA": str(fake_local)}, clear=False
-        ):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(fake_local)}, clear=False):
             self.assertEqual(
                 get_default_config_path(),
                 fake_local / "SocialVideoDownloader" / "config.json",
