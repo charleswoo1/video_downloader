@@ -1,16 +1,36 @@
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+
+APP_DIR_NAME = "SocialVideoDownloader"
+
+
+def get_default_config_path() -> Path:
+    """Return a stable per-user config path.
+
+    Windows: %LOCALAPPDATA%/SocialVideoDownloader/config.json
+    Other platforms: ~/.config/SocialVideoDownloader/config.json
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / APP_DIR_NAME / "config.json"
 
 
 class ConfigManager:
-    """管理使用者設定檔 (config.json)"""
+    """管理使用者設定檔 (config.json)。"""
 
-    def __init__(self, config_file: str = "config.json"):
-        # 優先在程式所在目錄尋找或建立設定檔
-        self.config_path = Path.cwd() / config_file
+    def __init__(self, config_file: Optional[str] = None):
+        # Explicit paths/names remain relative to cwd for tests and advanced use.
+        # Normal app usage stores settings in the user's application-data folder.
+        self.config_path = Path.cwd() / config_file if config_file else get_default_config_path()
+        self.legacy_config_path = Path.cwd() / "config.json" if config_file is None else None
+
         self.defaults: Dict[str, Any] = {
-            "output_dir": str(Path.cwd() / "Downloads"),
+            "output_dir": str(Path.home() / "Downloads"),
             "theme": "Dark",
             "quality": "best",
             "download_mode": "video",  # "video" or "audio"
@@ -23,27 +43,45 @@ class ConfigManager:
         }
         self.config: Dict[str, Any] = self.load_config()
 
-    def load_config(self) -> Dict[str, Any]:
-        """從硬碟讀取設定檔，若不存在則回傳預設值並儲存"""
-        if self.config_path.is_file():
-            try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # 合併預設值避免新版欄位缺失
-                    merged = self.defaults.copy()
-                    merged.update(data)
-                    return merged
-            except Exception as e:
-                print(f"[Config] 讀取設定檔失敗，將重置為預設: {e}")
-        self.save_config(self.defaults)
-        return self.defaults.copy()
+    def _read_config_file(self, path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("config root must be a JSON object")
+            merged = self.defaults.copy()
+            merged.update(data)
+            return merged
+        except Exception as e:
+            print(f"[Config] 讀取設定檔失敗 ({path})，將使用預設值: {e}")
+            return None
 
-    def save_config(self, new_config: Dict[str, Any] = None) -> None:
-        """儲存設定檔到硬碟"""
-        if new_config:
+    def load_config(self) -> Dict[str, Any]:
+        if self.config_path.is_file():
+            loaded = self._read_config_file(self.config_path)
+            if loaded is not None:
+                return loaded
+
+        # v1.0.0 stored config.json in the process working directory.
+        # Migrate once to the stable per-user location without deleting the old file.
+        if self.legacy_config_path and self.legacy_config_path.is_file():
+            loaded = self._read_config_file(self.legacy_config_path)
+            if loaded is not None:
+                self.config = loaded
+                self.save_config()
+                print(f"[Config] 已將舊設定搬移至: {self.config_path}")
+                return loaded
+
+        self.config = self.defaults.copy()
+        self.save_config()
+        return self.config.copy()
+
+    def save_config(self, new_config: Optional[Dict[str, Any]] = None) -> None:
+        if new_config is not None:
             self.config = new_config
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.config_path.open("w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"[Config] 儲存設定檔失敗: {e}")
