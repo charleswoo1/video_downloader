@@ -13,9 +13,9 @@ permissions:
 
 jobs:
   test:
-    name: Windows tests
+    name: Windows tests & packaging smoke test
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -29,7 +29,24 @@ jobs:
 
       - name: Install FFmpeg
         shell: pwsh
-        run: choco install ffmpeg -y --no-progress
+        run: |
+          choco install ffmpeg -y --no-progress
+
+          $ffmpeg = Get-ChildItem "$env:ChocolateyInstall\lib" -Recurse -Filter "ffmpeg.exe" -File |
+            Where-Object { $_.Length -gt 1000000 } |
+            Select-Object -First 1
+
+          if (-not $ffmpeg) {
+            throw "Could not locate the real ffmpeg.exe installed by Chocolatey."
+          }
+
+          $ffprobe = Join-Path $ffmpeg.Directory.FullName "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) {
+            throw "Could not locate ffprobe.exe next to ffmpeg.exe."
+          }
+
+          "FFMPEG_BIN_DIR=$($ffmpeg.Directory.FullName)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Python dependencies
         shell: pwsh
@@ -42,8 +59,22 @@ jobs:
         run: |
           python --version
           node --version
-          ffmpeg -version
+          & "$env:FFMPEG_BIN_DIR\ffmpeg.exe" -version
+          & "$env:FFMPEG_BIN_DIR\ffprobe.exe" -version
 
       - name: Run unit tests
         shell: pwsh
         run: python -m unittest -v test_suite.py
+
+      - name: Build standalone EXE smoke test
+        shell: pwsh
+        run: python build_exe.py --onefile
+
+      - name: Verify standalone EXE
+        shell: pwsh
+        run: |
+          $exe = "dist\SocialVideoDownloader_Standalone.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Standalone EXE was not created."
+          }
+          Get-Item $exe | Format-List Name,Length,LastWriteTime
