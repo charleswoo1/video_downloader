@@ -1,0 +1,13 @@
+# Release-build dependency lock derived from the successful v1.0.0 build.
+# Update deliberately through Dependabot or a tested maintenance PR.
+altgraph==0.17.5
+customtkinter==6.0.0
+darkdetect==0.8.0
+packaging==26.3
+pefile==2024.8.26
+pillow==12.3.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7
+pywin32-ctypes==0.2.3
+setuptools==84.0.0
+yt-dlp==2026.8.19
