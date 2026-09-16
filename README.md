@@ -16,7 +16,7 @@
 
 [下載最新版本 SocialVideoDownloader_Standalone.exe](https://github.com/charleswoo1/video_downloader/releases/latest/download/SocialVideoDownloader_Standalone.exe)
 
-也可以前往 [Releases](https://github.com/charleswoo1/video_downloader/releases) 查看歷史版本、更新說明與 SHA-256 驗證碼。新版 Release 也會附上 `BUILD-METADATA.txt`，記錄實際建置版本與 commit。
+也可以前往 [Releases](https://github.com/charleswoo1/video_downloader/releases) 查看歷史版本、更新說明與 SHA-256 驗證碼。後續 Release 也會附上 `BUILD-METADATA.txt`，記錄實際建置版本與 commit。
 
 ### Windows SmartScreen 提示
 
@@ -32,7 +32,8 @@
 - 可下載支援平台提供的字幕並轉成 SRT。
 - 可選擇瀏覽器 Cookie，處理需要登入才能存取的內容。
 - 深色 / 淺色介面。
-- Windows Release 單檔版會隨附 FFmpeg、FFprobe 與 Node.js，不需要另外安裝執行環境。\n- 應用程式設定儲存在 `%LOCALAPPDATA%\\SocialVideoDownloader\\config.json`；舊版工作目錄中的 `config.json` 會在首次啟動時自動搬移。
+- Windows Release 單檔版會隨附 FFmpeg、FFprobe 與 Node.js，不需要另外安裝執行環境。
+- 應用程式設定儲存在 `%LOCALAPPDATA%\SocialVideoDownloader\config.json`；v1.0.0 工作目錄中的舊 `config.json` 會在首次啟動時自動搬移。
 
 ## 支援概況
 
@@ -128,7 +129,9 @@ python build_exe.py --onefile
 dist/SocialVideoDownloader_Standalone.exe
 ```
 
-一般開發使用 `requirements.txt`；正式 Release 則使用 `requirements-release.txt` 的固定版本，以降低同一版本在不同時間重建時產生差異的風險。\n\n打包程式會嘗試尋找本機的 FFmpeg、FFprobe 與 Node.js。若要明確指定 FFmpeg 所在目錄：
+一般開發使用 `requirements.txt`；正式 Release 則使用 `requirements-release.txt` 的固定版本，以降低不同時間重建時的依賴漂移。
+
+打包程式會嘗試尋找本機的 FFmpeg、FFprobe 與 Node.js。若要明確指定 FFmpeg 所在目錄：
 
 ```powershell
 $env:FFMPEG_BIN_DIR = "C:\path\to\ffmpeg\bin"
@@ -150,7 +153,7 @@ python build_exe.py --onefile
 - Push 到 `main`
 - 對 `main` 建立或更新 Pull Request
 
-CI 會使用固定的 Python / Node.js / FFmpeg 與 `requirements-release.txt`、執行 `test_suite.py`，並做一次單檔 EXE 打包 smoke test。GitHub 官方 Actions 也以完整 commit SHA 固定，並交由 Dependabot追蹤更新。
+CI 會使用固定的 Python / Node.js / FFmpeg 與 `requirements-release.txt`、執行 `test_suite.py`，並做一次單檔 EXE 打包 smoke test。GitHub 官方 Actions 以完整 commit SHA 固定，並由 Dependabot 追蹤更新。
 
 ### 自動建立 GitHub Release
 
@@ -158,32 +161,37 @@ CI 會使用固定的 Python / Node.js / FFmpeg 與 `requirements-release.txt`�
 
 Release workflow 會：
 
-1. 使用 `windows-latest` 建置。
-2. 安裝 Python 依賴與 FFmpeg。
-3. 執行單元測試。
-4. 以 PyInstaller 建立 `SocialVideoDownloader_Standalone.exe`。
-5. 把 FFmpeg、FFprobe 與 Node.js 一起打包。
-6. 產生 `SHA256SUMS.txt`。
-7. 建立 GitHub Release 並直接附上可下載 EXE。
-
-有兩種觸發方式。
+1. 使用固定版本的 Python、Node.js、FFmpeg 與 Python 套件。
+2. 驗證 Git tag 必須與 `version.py` 完全一致。
+3. 確認相同 tag / Release 尚未存在。
+4. 執行單元測試。
+5. 以 PyInstaller 建立 `SocialVideoDownloader_Standalone.exe`。
+6. 把 FFmpeg、FFprobe 與 Node.js 一起打包。
+7. 產生 `SHA256SUMS.txt` 與 `BUILD-METADATA.txt`。
+8. 建立新的 GitHub Release；已發布版本不會被覆寫。
 
 #### 方法 A：Git tag
 
-```powershell
-git tag v1.0.0
-git push origin v1.0.0
+先更新 `version.py`，例如：
+
+```python
+__version__ = "1.0.1"
 ```
 
-任何 `v*` tag 都會啟動 Release workflow；正式版本使用 SemVer。建立 tag 前必須先把 `version.py` 更新成相同版本，例如 `__version__ = "1.0.1"` 對應 `v1.0.1`。已發布的版本不可覆寫或重用。
+再建立相同版本 tag：
+
+```powershell
+git tag v1.0.1
+git push origin v1.0.1
+```
 
 #### 方法 B：GitHub 網頁手動發佈
 
 1. 打開 repository 的 **Actions**。
 2. 選擇 **Build & Release Windows EXE**。
 3. 點 **Run workflow**。
-4. 輸入版本，例如 `v1.0.0`。
-5. workflow 成功後會自動建立對應的 GitHub Release。
+4. 輸入與 `version.py` 相同的版本，例如 `v1.0.1`。
+5. workflow 成功後會建立對應 Release；若 tag 或 Release 已存在則停止。
 
 ---
 
@@ -192,6 +200,9 @@ git push origin v1.0.0
 ```text
 .
 ├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   ├── dependabot.yml
+│   ├── PULL_REQUEST_TEMPLATE.md
 │   └── workflows/
 │       ├── ci.yml
 │       └── release.yml
@@ -201,10 +212,14 @@ git push origin v1.0.0
 ├── app.py
 ├── build_exe.py
 ├── config_manager.py
-├── download_merge.py
+├── CONTRIBUTING.md
 ├── downloader_engine.py
 ├── requirements.txt
+├── requirements-release.txt
+├── SECURITY.md
 ├── test_suite.py
+├── THIRD_PARTY_NOTICES.md
+├── version.py
 └── README.md
 ```
 
@@ -212,8 +227,10 @@ git push origin v1.0.0
 
 - `app.py`：桌面 GUI。
 - `downloader_engine.py`：平台辨識、yt-dlp、FFmpeg、字幕、Cookie 與下載流程。
-- `config_manager.py`：本機設定。
+- `config_manager.py`：本機設定管理與舊版設定搬移。
 - `build_exe.py`：PyInstaller Windows 打包。
+- `version.py`：應用程式版本的單一來源。
+- `requirements-release.txt`：正式建置使用的固定 Python 依賴。
 - `test_suite.py`：基礎單元測試。
 
 ---
@@ -240,16 +257,9 @@ git push origin v1.0.0
 
 ## 問題回報
 
-若遇到問題，請在 GitHub Issues 提供：
+若遇到問題，請使用 GitHub Issues 的 Bug Report template。請先移除帳號、Cookie、Token、本機路徑與其他個人資訊。
 
-- Windows 版本
-- App / Release 版本
-- 來源平台
-- 可公開分享的網址（若可以）
-- 錯誤訊息或畫面
-- 是否有使用 Cookie
-
-請先移除帳號、Cookie、Token、本機路徑與其他個人資訊。
+安全性問題請先閱讀 [`SECURITY.md`](SECURITY.md)，一般貢獻流程請參閱 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## 使用與授權提醒
 
