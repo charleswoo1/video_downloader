@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+title: "[Feature] "
+labels:
+  - "enhancement"
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to accomplish?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This request is for lawful downloading/processing and does not require DRM circumvention.
+          required: true

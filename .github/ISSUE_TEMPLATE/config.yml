@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security-related reports
+    url: https://github.com/charleswoo1/video_downloader/security
+    about: Do not post cookies, tokens, credentials, or other secrets in a public issue.

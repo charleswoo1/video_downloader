@@ -19,25 +19,31 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
           cache: pip
+          cache-dependency-path: requirements-release.txt
 
-      - name: Install FFmpeg
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Install pinned FFmpeg
         shell: pwsh
         run: |
-          choco install ffmpeg -y --no-progress
+          choco install ffmpeg --version=9.0.1 -y --no-progress
 
-          $ffmpeg = Get-ChildItem "$env:ChocolateyInstall\lib" -Recurse -Filter "ffmpeg.exe" -File |
+          $ffmpeg = Get-ChildItem "$env:ChocolateyInstall\lib\ffmpeg\tools" -Recurse -Filter "ffmpeg.exe" -File |
             Where-Object { $_.Length -gt 1000000 } |
             Select-Object -First 1
 
           if (-not $ffmpeg) {
-            throw "Could not locate the real ffmpeg.exe installed by Chocolatey."
+            throw "Could not locate the pinned ffmpeg.exe installed by Chocolatey."
           }
 
           $ffprobe = Join-Path $ffmpeg.Directory.FullName "ffprobe.exe"
@@ -48,16 +54,18 @@ jobs:
           "FFMPEG_BIN_DIR=$($ffmpeg.Directory.FullName)" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install Python dependencies
+      - name: Install pinned release dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip --version
+          pip install -r requirements-release.txt
+          pip check
 
-      - name: Verify runtime tools
+      - name: Verify runtime versions
         shell: pwsh
         run: |
           python --version
+          python -c "from version import __version__; print('App version:', __version__)"
           node --version
           & "$env:FFMPEG_BIN_DIR\ffmpeg.exe" -version
           & "$env:FFMPEG_BIN_DIR\ffprobe.exe" -version
