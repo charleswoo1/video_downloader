@@ -30,6 +30,87 @@ class TestVideoDownloader(unittest.TestCase):
             self.assertEqual(res["name"], expected_name, f"Failed for {url}")
             self.assertEqual(res["has_subtitles"], expected_subs, f"Subtitles flag mismatch for {url}")
 
+    def test_threads_media_url_normalization(self):
+        url = "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr/media?x=1#fragment"
+        self.assertEqual(
+            DownloaderEngine._normalize_threads_url(url),
+            "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr",
+        )
+
+    def test_threads_crawler_selects_requested_post_not_recommendation(self):
+        page_data = {
+            "payload": {
+                "recommended": {
+                    "code": "OtherPost123",
+                    "video_versions": [
+                        {"url": "https://scontent.example/recommended.mp4?sig=wrong", "height": 720}
+                    ],
+                },
+                "requested": {
+                    "code": "DdRLvLZE-Rr",
+                    "canonical_url": "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr",
+                    "user": {"username": "cuqhytr"},
+                    "caption": {"text": "Regression target video"},
+                    "original_height": 1080,
+                    "video_versions": [
+                        {"url": "https://scontent.example/target.mp4?sig=correct", "height": 1080},
+                        {"url": "https://scontent.example/target.mp4?sig=alternate", "height": 1080},
+                    ],
+                    "image_versions2": {
+                        "candidates": [
+                            {"url": "https://scontent.example/thumb.jpg", "width": 1080, "height": 1920}
+                        ]
+                    },
+                },
+            }
+        }
+        webpage = (
+            '<html><body><script type="application/json" data-sjs>'
+            + json.dumps(page_data)
+            + "</script></body></html>"
+        )
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.read.return_value = webpage.encode("utf-8")
+
+        engine = DownloaderEngine()
+        with mock.patch("downloader_engine.urllib.request.urlopen", return_value=response) as urlopen:
+            info = engine._extract_threads_info(
+                "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr/media"
+            )
+
+        request = urlopen.call_args.args[0]
+        self.assertIn("Googlebot", request.get_header("User-agent"))
+        self.assertEqual(request.full_url, "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr")
+        self.assertEqual(info["id"], "DdRLvLZE-Rr")
+        self.assertEqual(info["uploader"], "@cuqhytr")
+        self.assertEqual(info["direct_video_url"], "https://scontent.example/target.mp4?sig=correct")
+        self.assertNotIn("recommended.mp4", info["direct_video_url"])
+        self.assertEqual(info["available_resolutions"], [1080])
+        self.assertEqual(info["raw_info"]["threads_parser"], "crawler_ssr_json")
+
+    def test_threads_missing_target_does_not_fall_back_to_other_video(self):
+        page_data = {
+            "recommended": {
+                "code": "OtherPost123",
+                "video_versions": [{"url": "https://scontent.example/recommended.mp4"}],
+            }
+        }
+        webpage = '<script type="application/json">' + json.dumps(page_data) + "</script>"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.read.return_value = webpage.encode("utf-8")
+
+        engine = DownloaderEngine()
+        with mock.patch("downloader_engine.urllib.request.urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "為避免抓到推薦影片"):
+                engine._extract_threads_info(
+                    "https://www.threads.com/@cuqhytr/post/DdRLvLZE-Rr/media"
+                )
+
     def test_config_manager_explicit_test_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("pathlib.Path.cwd", return_value=Path(tmp)):
