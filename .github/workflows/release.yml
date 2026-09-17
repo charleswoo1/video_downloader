@@ -52,6 +52,15 @@ jobs:
             throw "Release tag '$tag' does not match application version '$appVersion'. Update version.py first."
           }
 
+          $releaseNotesPath = ".github/release-notes/$tag.md"
+          if (-not (Test-Path $releaseNotesPath)) {
+            throw "Missing curated release notes '$releaseNotesPath'. Add a user-facing release summary before publishing."
+          }
+
+          if ([string]::IsNullOrWhiteSpace((Get-Content $releaseNotesPath -Raw -Encoding utf8))) {
+            throw "Curated release notes '$releaseNotesPath' are empty."
+          }
+
           gh release view "$tag" --repo "$env:GITHUB_REPOSITORY" *> $null
           if ($LASTEXITCODE -eq 0) {
             throw "Release '$tag' already exists. Published releases are never overwritten."
@@ -66,6 +75,7 @@ jobs:
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "app_version=$appVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "notes_file=$releaseNotesPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -148,6 +158,31 @@ jobs:
           Get-Item $exe | Format-List Name,Length,LastWriteTime
           Get-Content "dist\SHA256SUMS.txt"
 
+      - name: Assemble release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          CURATED_NOTES_FILE: ${{ steps.version.outputs.notes_file }}
+        run: |
+          $generatedJson = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" -f "tag_name=$env:RELEASE_TAG" -f "target_commitish=$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub failed to generate the automatic changelog."
+          }
+
+          $generatedBody = ($generatedJson | ConvertFrom-Json).body
+          $curatedBody = (Get-Content $env:CURATED_NOTES_FILE -Raw -Encoding utf8).Trim()
+
+          @(
+            $curatedBody
+            ""
+            "---"
+            ""
+            $generatedBody.Trim()
+          ) | Out-File -FilePath "dist\RELEASE-NOTES.md" -Encoding utf8
+
+          Get-Content "dist\RELEASE-NOTES.md"
+
       - name: Publish new GitHub Release
         shell: pwsh
         env:
@@ -155,7 +190,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            gh release create "$env:RELEASE_TAG" "dist\SocialVideoDownloader_Standalone.exe" "dist\SHA256SUMS.txt" "dist\BUILD-METADATA.txt" "THIRD_PARTY_NOTICES.md" --target "$env:GITHUB_SHA" --title "Social Video Downloader $env:RELEASE_TAG" --generate-notes --repo "$env:GITHUB_REPOSITORY"
+            gh release create "$env:RELEASE_TAG" "dist\SocialVideoDownloader_Standalone.exe" "dist\SHA256SUMS.txt" "dist\BUILD-METADATA.txt" "THIRD_PARTY_NOTICES.md" --target "$env:GITHUB_SHA" --title "Social Video Downloader $env:RELEASE_TAG" --notes-file "dist\RELEASE-NOTES.md" --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create "$env:RELEASE_TAG" "dist\SocialVideoDownloader_Standalone.exe" "dist\SHA256SUMS.txt" "dist\BUILD-METADATA.txt" "THIRD_PARTY_NOTICES.md" --title "Social Video Downloader $env:RELEASE_TAG" --generate-notes --repo "$env:GITHUB_REPOSITORY"
+            gh release create "$env:RELEASE_TAG" "dist\SocialVideoDownloader_Standalone.exe" "dist\SHA256SUMS.txt" "dist\BUILD-METADATA.txt" "THIRD_PARTY_NOTICES.md" --title "Social Video Downloader $env:RELEASE_TAG" --notes-file "dist\RELEASE-NOTES.md" --repo "$env:GITHUB_REPOSITORY"
           }
