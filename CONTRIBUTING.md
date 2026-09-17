@@ -29,6 +29,26 @@ Git tag    -> v1.0.1
 
 Published release tags and assets are not reused or overwritten.
 
+## Release notes
+
+Every release must include a curated, user-facing summary at:
+
+```text
+.github/release-notes/vX.Y.Z.md
+```
+
+The filename must exactly match the release tag. For example, release `v1.0.1` requires `.github/release-notes/v1.0.1.md`.
+
+The release workflow refuses to publish when this file is missing or empty. At release time it places the curated summary first, then appends GitHub's automatically generated changelog so users see the important changes before the raw Pull Request history.
+
+Release summaries should focus on:
+
+- user-visible changes
+- upgrade or migration notes
+- security or privacy-impacting changes
+- download/runtime requirements that changed
+- known limitations that matter to users
+
 ## Dependencies
 
 - `requirements.txt` describes the normal development dependency ranges.
