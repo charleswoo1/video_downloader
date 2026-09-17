@@ -1,6 +1,7 @@
 import html as html_lib
 import json
 import re
+import subprocess
 import time
 import urllib.request
 from pathlib import Path
@@ -19,6 +20,23 @@ _BROWSER_UA = (
 )
 _THREADS_MEDIA_KEYS = {"video_versions", "video_dash_manifest", "image_versions2", "carousel_media"}
 _THREADS_DOMAINS = ("threads.com", "threads.net")
+
+_DASH_ADAPTATION_RE = re.compile(
+    r"<AdaptationSet\b(?P<attrs>[^>]*)>(?P<body>.*?)</AdaptationSet\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DASH_REPRESENTATION_RE = re.compile(
+    r"<Representation\b(?P<attrs>[^>]*)>(?P<body>.*?)</Representation\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DASH_BASE_URL_RE = re.compile(
+    r"<BaseURL\b[^>]*>(?P<url>.*?)</BaseURL\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DASH_ATTRIBUTE_RE = re.compile(
+    r'([A-Za-z_][\w:.-]*)\s*=\s*(["\'])(.*?)\2',
+    re.DOTALL,
+)
 
 
 class DownloaderEngine(_BaseDownloaderEngine):
@@ -45,9 +63,14 @@ class DownloaderEngine(_BaseDownloaderEngine):
 
     @classmethod
     def _collect_threads_posts(cls, obj: Any, out: List[Dict[str, Any]]) -> None:
-        """遞迴收集帶 shortcode 與媒體欄位的 Threads post dict。"""
+        """
+        收集所有帶 shortcode/code 的貼文物件。
+
+        quote/repost facade 的外層貼文可能沒有直接 media 欄位，因此不能再要求
+        video_versions 等欄位存在；之後會用 requested shortcode 精準選取目標貼文。
+        """
         if isinstance(obj, dict):
-            if obj.get("code") and (set(obj.keys()) & _THREADS_MEDIA_KEYS):
+            if isinstance(obj.get("code"), str) and obj.get("code"):
                 out.append(obj)
             for value in obj.values():
                 cls._collect_threads_posts(value, out)
@@ -116,9 +139,26 @@ class DownloaderEngine(_BaseDownloaderEngine):
                         if candidate.get("code") == post_id:
                             return candidate
 
-                    if obj.get("code") == post_id and (set(obj.keys()) & _THREADS_MEDIA_KEYS):
+                    if obj.get("code") == post_id:
                         return obj
         return None
+
+    @classmethod
+    def _iter_threads_media_nodes(cls, obj: Any):
+        """
+        僅在已選定的目標貼文樹內遞迴尋找 media 節點。
+
+        這會涵蓋 carousel、quoted_post、reposted_post、dash_info 與其他 wrapper，
+        但不會掃描頁面上目標貼文以外的推薦內容。
+        """
+        if isinstance(obj, dict):
+            if set(obj.keys()) & _THREADS_MEDIA_KEYS:
+                yield obj
+            for value in obj.values():
+                yield from cls._iter_threads_media_nodes(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from cls._iter_threads_media_nodes(value)
 
     @staticmethod
     def _threads_video_urls(media: Dict[str, Any]) -> List[str]:
@@ -143,58 +183,206 @@ class DownloaderEngine(_BaseDownloaderEngine):
 
     @classmethod
     def _threads_post_video_urls(cls, post: Dict[str, Any]) -> List[str]:
-        """支援單影片與 carousel；目前 GUI 下載第一個影片，但保留完整 URL 清單。"""
-        urls = cls._threads_video_urls(post)
-        carousel = post.get("carousel_media")
-        if isinstance(carousel, list):
-            for item in carousel:
-                if isinstance(item, dict):
-                    urls.extend(cls._threads_video_urls(item))
-
-        deduped: List[str] = []
+        """遞迴支援 direct、carousel、quote/repost 與 nested media 的 progressive MP4。"""
+        urls: List[str] = []
         seen = set()
-        for candidate in urls:
-            key = candidate.split("?", 1)[0]
+        for media in cls._iter_threads_media_nodes(post):
+            for candidate in cls._threads_video_urls(media):
+                key = candidate.split("?", 1)[0]
+                if key not in seen:
+                    seen.add(key)
+                    urls.append(candidate)
+        return urls
+
+    @staticmethod
+    def _dash_attrs(text: str) -> Dict[str, str]:
+        return {
+            key: html_lib.unescape(value)
+            for key, _quote, value in _DASH_ATTRIBUTE_RE.findall(text)
+        }
+
+    @classmethod
+    def _parse_threads_dash_manifest(cls, manifest: str) -> List[Dict[str, Any]]:
+        """解析 Threads/Instagram 內嵌 MPD，取出可直接下載的 video/audio BaseURL。"""
+        if not isinstance(manifest, str) or "<MPD" not in manifest.upper():
+            return []
+
+        xml = (
+            html_lib.unescape(manifest)
+            .replace(r"\u0026", "&")
+            .replace(r"\/", "/")
+        )
+        tracks: List[Dict[str, Any]] = []
+        adaptation_matches = list(_DASH_ADAPTATION_RE.finditer(xml))
+        blocks = [
+            (cls._dash_attrs(match.group("attrs")), match.group("body"))
+            for match in adaptation_matches
+        ] or [({}, xml)]
+
+        for adaptation_attrs, body in blocks:
+            for rep in _DASH_REPRESENTATION_RE.finditer(body):
+                attrs = {**adaptation_attrs, **cls._dash_attrs(rep.group("attrs"))}
+                base_match = _DASH_BASE_URL_RE.search(rep.group("body"))
+                if not base_match:
+                    continue
+
+                url = cls._decode_threads_url(base_match.group("url").strip())
+                if not url.startswith(("https://", "http://")):
+                    continue
+
+                mime_type = str(attrs.get("mimeType") or "").lower()
+                content_type = str(attrs.get("contentType") or "").lower()
+                codecs = str(attrs.get("codecs") or "").lower()
+
+                if mime_type.startswith("audio/") or content_type == "audio" or codecs.startswith("mp4a"):
+                    kind = "audio"
+                elif mime_type.startswith("video/") or content_type == "video":
+                    kind = "video"
+                elif attrs.get("height") or codecs.startswith(("avc", "hev", "hvc", "vp", "av01")):
+                    kind = "video"
+                else:
+                    continue
+
+                def to_int(value: Any) -> int:
+                    try:
+                        return int(value or 0)
+                    except (TypeError, ValueError):
+                        return 0
+
+                tracks.append(
+                    {
+                        "kind": kind,
+                        "url": url,
+                        "width": to_int(attrs.get("width")),
+                        "height": to_int(attrs.get("height")),
+                        "bandwidth": to_int(attrs.get("bandwidth")),
+                        "codecs": attrs.get("codecs"),
+                    }
+                )
+
+        if not tracks:
+            for adaptation in adaptation_matches:
+                attrs = cls._dash_attrs(adaptation.group("attrs"))
+                base_match = _DASH_BASE_URL_RE.search(adaptation.group("body"))
+                if not base_match:
+                    continue
+                url = cls._decode_threads_url(base_match.group("url").strip())
+                if not url.startswith(("https://", "http://")):
+                    continue
+                mime_type = str(attrs.get("mimeType") or "").lower()
+                content_type = str(attrs.get("contentType") or "").lower()
+                if mime_type.startswith("audio/") or content_type == "audio":
+                    kind = "audio"
+                elif mime_type.startswith("video/") or content_type == "video":
+                    kind = "video"
+                else:
+                    continue
+                tracks.append(
+                    {
+                        "kind": kind,
+                        "url": url,
+                        "width": 0,
+                        "height": 0,
+                        "bandwidth": 0,
+                        "codecs": attrs.get("codecs"),
+                    }
+                )
+
+        unique: List[Dict[str, Any]] = []
+        seen = set()
+        for track in tracks:
+            key = (track["kind"], track["url"].split("?", 1)[0])
             if key not in seen:
                 seen.add(key)
-                deduped.append(candidate)
-        return deduped
+                unique.append(track)
+        return unique
 
-    @staticmethod
-    def _threads_thumbnail(post: Dict[str, Any]) -> Optional[str]:
-        def first_candidate(media: Dict[str, Any]) -> Optional[str]:
+    @classmethod
+    def _threads_dash_tracks(cls, post: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tracks: List[Dict[str, Any]] = []
+        seen = set()
+        for media in cls._iter_threads_media_nodes(post):
+            manifest = media.get("video_dash_manifest")
+            if not isinstance(manifest, str):
+                continue
+            for track in cls._parse_threads_dash_manifest(manifest):
+                key = (track["kind"], track["url"].split("?", 1)[0])
+                if key not in seen:
+                    seen.add(key)
+                    tracks.append(track)
+        return tracks
+
+    @classmethod
+    def _select_threads_streams(cls, post: Dict[str, Any]) -> Dict[str, Any]:
+        progressive = cls._threads_post_video_urls(post)
+        if progressive:
+            return {
+                "kind": "progressive",
+                "video_url": progressive[0],
+                "video_urls": progressive,
+                "audio_url": None,
+            }
+
+        tracks = cls._threads_dash_tracks(post)
+        video_tracks = [track for track in tracks if track["kind"] == "video"]
+        audio_tracks = [track for track in tracks if track["kind"] == "audio"]
+        if not video_tracks:
+            return {
+                "kind": "none",
+                "video_url": None,
+                "video_urls": [],
+                "audio_url": None,
+            }
+
+        best_video = max(
+            video_tracks,
+            key=lambda track: (
+                track.get("height") or 0,
+                track.get("width") or 0,
+                track.get("bandwidth") or 0,
+            ),
+        )
+        best_audio = max(
+            audio_tracks,
+            key=lambda track: track.get("bandwidth") or 0,
+            default=None,
+        )
+        return {
+            "kind": "dash",
+            "video_url": best_video["url"],
+            "video_urls": [track["url"] for track in video_tracks],
+            "audio_url": best_audio["url"] if best_audio else None,
+            "video_height": best_video.get("height") or None,
+        }
+
+    @classmethod
+    def _threads_thumbnail(cls, post: Dict[str, Any]) -> Optional[str]:
+        for media in cls._iter_threads_media_nodes(post):
             image_versions = media.get("image_versions2")
             if not isinstance(image_versions, dict):
-                return None
+                continue
             candidates = image_versions.get("candidates")
             if not isinstance(candidates, list):
-                return None
+                continue
+            valid = []
             for candidate in candidates:
-                if isinstance(candidate, dict):
-                    value = candidate.get("url")
-                    if isinstance(value, str):
-                        value = DownloaderEngine._decode_threads_url(value)
-                        if value.startswith(("https://", "http://")):
-                            return value
-            return None
-
-        thumb = first_candidate(post)
-        if thumb:
-            return thumb
-        carousel = post.get("carousel_media")
-        if isinstance(carousel, list):
-            for item in carousel:
-                if isinstance(item, dict):
-                    thumb = first_candidate(item)
-                    if thumb:
-                        return thumb
+                if not isinstance(candidate, dict):
+                    continue
+                value = candidate.get("url")
+                if not isinstance(value, str):
+                    continue
+                value = cls._decode_threads_url(value)
+                if value.startswith(("https://", "http://")):
+                    valid.append((candidate.get("width") or 0, value))
+            if valid:
+                valid.sort(key=lambda item: item[0], reverse=True)
+                return valid[0][1]
         return None
 
-    @staticmethod
-    def _threads_resolutions(post: Dict[str, Any]) -> List[int]:
+    @classmethod
+    def _threads_resolutions(cls, post: Dict[str, Any]) -> List[int]:
         heights = set()
-
-        def collect(media: Dict[str, Any]) -> None:
+        for media in cls._iter_threads_media_nodes(post):
             original_height = media.get("original_height")
             if isinstance(original_height, int) and original_height > 0:
                 heights.add(original_height)
@@ -203,14 +391,35 @@ class DownloaderEngine(_BaseDownloaderEngine):
                     height = version.get("height")
                     if isinstance(height, int) and height > 0:
                         heights.add(height)
-
-        collect(post)
-        carousel = post.get("carousel_media")
-        if isinstance(carousel, list):
-            for item in carousel:
-                if isinstance(item, dict):
-                    collect(item)
+        for track in cls._threads_dash_tracks(post):
+            if track["kind"] == "video" and isinstance(track.get("height"), int) and track["height"] > 0:
+                heights.add(track["height"])
         return sorted(heights, reverse=True)
+
+    @classmethod
+    def _threads_media_diagnostics(cls, post: Dict[str, Any]) -> str:
+        media_nodes = list(cls._iter_threads_media_nodes(post))
+        progressive_count = len(cls._threads_post_video_urls(post))
+        dash_tracks = cls._threads_dash_tracks(post)
+        dash_video_count = sum(1 for track in dash_tracks if track["kind"] == "video")
+
+        def contains_key(obj: Any, key: str) -> bool:
+            if isinstance(obj, dict):
+                if key in obj and obj.get(key) is not None:
+                    return True
+                return any(contains_key(value, key) for value in obj.values())
+            if isinstance(obj, list):
+                return any(contains_key(value, key) for value in obj)
+            return False
+
+        return (
+            f"media_type={post.get('media_type')}, "
+            f"media_nodes={len(media_nodes)}, "
+            f"progressive={progressive_count}, "
+            f"dash_video={dash_video_count}, "
+            f"quoted_post={'yes' if contains_key(post, 'quoted_post') else 'no'}, "
+            f"reposted_post={'yes' if contains_key(post, 'reposted_post') else 'no'}"
+        )
 
     @staticmethod
     def _is_threads_cookie(cookie: Any) -> bool:
@@ -308,16 +517,13 @@ class DownloaderEngine(_BaseDownloaderEngine):
                 "登入可能已失效，或 Threads 已變更頁面結構；為避免誤抓推薦影片，下載已中止。"
             )
 
-        video_urls = self._threads_post_video_urls(target_post)
-        if not video_urls:
-            media_type = target_post.get("media_type")
-            if media_type == 1:
-                kind = "圖片貼文"
-            elif media_type == 8:
-                kind = "輪播貼文，但未找到影片項目"
-            else:
-                kind = "沒有可下載影片或影片資料結構已變更"
-            raise ValueError(f"此 Threads 貼文存在，但{kind}。")
+        streams = self._select_threads_streams(target_post)
+        if not streams["video_url"]:
+            diagnostics = self._threads_media_diagnostics(target_post)
+            raise ValueError(
+                "此 Threads 貼文存在，但目前解析不到可下載影片。"
+                f" 診斷: {diagnostics}"
+            )
 
         user = target_post.get("user") if isinstance(target_post.get("user"), dict) else {}
         username = user.get("username")
@@ -345,21 +551,25 @@ class DownloaderEngine(_BaseDownloaderEngine):
             "thumbnail": self._threads_thumbnail(target_post),
             "webpage_url": target_post.get("canonical_url") or clean_url,
             "platform": self.detect_platform(url),
-            "available_resolutions": resolutions or [1080],
+            "available_resolutions": resolutions or ([streams.get("video_height")] if streams.get("video_height") else [1080]),
             "available_subtitles": [],
             "is_direct_stream": True,
-            "direct_video_url": video_urls[0],
-            "direct_video_urls": video_urls,
+            "direct_video_url": streams["video_url"],
+            "direct_video_urls": streams["video_urls"],
+            "direct_audio_url": streams.get("audio_url"),
+            "threads_stream_kind": streams["kind"],
             "http_headers": {
                 "User-Agent": _BROWSER_UA,
                 "Referer": clean_url,
             },
             "raw_info": {
                 "title": title,
-                "threads_parser": "authenticated_browser_html",
+                "threads_parser": "authenticated_recursive_media",
                 "threads_post_id": post_id,
-                "threads_video_count": len(video_urls),
+                "threads_video_count": len(streams["video_urls"]),
                 "threads_authenticated": authenticated,
+                "threads_stream_kind": streams["kind"],
+                "threads_dash_audio": bool(streams.get("audio_url")),
             },
         }
 
@@ -416,6 +626,73 @@ class DownloaderEngine(_BaseDownloaderEngine):
         if progress_callback:
             progress_callback({"status": "finished", "filename": str(destination)})
 
+    def _download_threads_dash(
+        self,
+        info: Dict[str, Any],
+        destination: Path,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> None:
+        """下載 DASH video/audio BaseURL，必要時以 FFmpeg remux 成單一 MP4。"""
+        video_tmp = destination.with_name(destination.stem + ".dash-video.mp4")
+        audio_tmp = destination.with_name(destination.stem + ".dash-audio.mp4")
+        headers = info["http_headers"]
+
+        try:
+            self._download_threads_stream(
+                info["direct_video_url"],
+                video_tmp,
+                headers,
+                progress_callback,
+            )
+
+            audio_url = info.get("direct_audio_url")
+            if not audio_url:
+                video_tmp.replace(destination)
+                return
+
+            self._download_threads_stream(
+                audio_url,
+                audio_tmp,
+                headers,
+                progress_callback,
+            )
+
+            ffmpeg_cmd = "ffmpeg"
+            if self.ffmpeg_dir:
+                exe_candidate = Path(self.ffmpeg_dir) / "ffmpeg.exe"
+                ffmpeg_cmd = str(exe_candidate) if exe_candidate.is_file() else str(Path(self.ffmpeg_dir) / "ffmpeg")
+
+            cmd = [
+                ffmpeg_cmd,
+                "-y",
+                "-i",
+                str(video_tmp),
+                "-i",
+                str(audio_tmp),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                str(destination),
+            ]
+            try:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                raise RuntimeError("Threads DASH 影片與音訊已下載，但 FFmpeg 合併失敗。") from exc
+        finally:
+            for path in (video_tmp, audio_tmp):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     def download(
         self,
         url: str,
@@ -460,14 +737,19 @@ class DownloaderEngine(_BaseDownloaderEngine):
         safe_title = safe_title[:140] or f"Threads_{info['id']}"
 
         video_path = output_dir / f"{safe_title}.mp4"
+        stream_kind = info.get("threads_stream_kind", "progressive")
         log(f"✅ 已取得目標貼文串流: {title}")
-        log("📹 開始下載 Threads MP4...")
-        self._download_threads_stream(
-            info["direct_video_url"],
-            video_path,
-            info["http_headers"],
-            progress_callback,
-        )
+        log(f"📹 開始下載 Threads MP4 ({stream_kind})...")
+
+        if stream_kind == "dash":
+            self._download_threads_dash(info, video_path, progress_callback)
+        else:
+            self._download_threads_stream(
+                info["direct_video_url"],
+                video_path,
+                info["http_headers"],
+                progress_callback,
+            )
 
         downloaded_file: Path = video_path
         if mode == "audio":
