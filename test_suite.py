@@ -12,6 +12,32 @@ from version import __version__
 
 
 class TestVideoDownloader(unittest.TestCase):
+    @staticmethod
+    def _threads_dash_manifest():
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">'
+            '<Period>'
+            '<AdaptationSet contentType="video">'
+            '<Representation bandwidth="600000" mimeType="video/mp4" width="720" height="1280">'
+            '<BaseURL>https://scontent.example/video-720.mp4?sig=one&amp;x=1</BaseURL>'
+            '</Representation>'
+            '<Representation bandwidth="900000" mimeType="video/mp4" width="1080" height="1920">'
+            '<BaseURL>https://scontent.example/video-1080.mp4?sig=two</BaseURL>'
+            '</Representation>'
+            '</AdaptationSet>'
+            '<AdaptationSet contentType="audio">'
+            '<Representation bandwidth="64000" mimeType="audio/mp4">'
+            '<BaseURL>https://scontent.example/audio-low.mp4?sig=low</BaseURL>'
+            '</Representation>'
+            '<Representation bandwidth="128000" mimeType="audio/mp4">'
+            '<BaseURL>https://scontent.example/audio-high.mp4?sig=high</BaseURL>'
+            '</Representation>'
+            '</AdaptationSet>'
+            '</Period>'
+            '</MPD>'
+        )
+
     def test_platform_detection(self):
         cases = [
             ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "YouTube", True),
@@ -99,7 +125,8 @@ class TestVideoDownloader(unittest.TestCase):
         self.assertEqual(info["direct_video_url"], "https://scontent.example/target.mp4?sig=correct")
         self.assertNotIn("recommended.mp4", info["direct_video_url"])
         self.assertEqual(info["available_resolutions"], [1080])
-        self.assertEqual(info["raw_info"]["threads_parser"], "authenticated_browser_html")
+        self.assertEqual(info["raw_info"]["threads_parser"], "authenticated_browser_html_recursive")
+        self.assertEqual(info["threads_media_kind"], "progressive")
         self.assertTrue(info["raw_info"]["threads_authenticated"])
 
     def test_threads_escaped_payload_is_parsed(self):
@@ -115,6 +142,216 @@ class TestVideoDownloader(unittest.TestCase):
             engine._threads_post_video_urls(target)[0],
             "https://scontent.example/target.mp4?sig=correct",
         )
+
+    def test_threads_direct_video_versions_resolver(self):
+        post = {
+            "code": "Direct1",
+            "video_versions": [
+                {"url": "https://scontent.example/480.mp4", "height": 480},
+                {"url": "https://scontent.example/1080.mp4", "height": 1080},
+            ],
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(resolved["candidates"][0]["kind"], "progressive")
+        self.assertEqual(resolved["candidates"][0]["video_url"], "https://scontent.example/1080.mp4")
+        self.assertEqual(resolved["candidates"][0]["height"], 1080)
+
+    def test_threads_dash_only_manifest_resolver(self):
+        post = {
+            "code": "DashOnly1",
+            "video_dash_manifest": self._threads_dash_manifest(),
+        }
+        resolved = DownloaderEngine.resolve_threads_media(
+            post,
+            base_url="https://www.threads.com/@test/post/DashOnly1",
+        )
+        candidate = resolved["candidates"][0]
+        self.assertEqual(candidate["kind"], "dash")
+        self.assertEqual(candidate["video_url"], "https://scontent.example/video-1080.mp4?sig=two")
+        self.assertEqual(candidate["audio_url"], "https://scontent.example/audio-high.mp4?sig=high")
+        self.assertEqual(candidate["height"], 1920)
+
+    def test_threads_progressive_is_preferred_over_dash(self):
+        post = {
+            "code": "Both1",
+            "video_dash_manifest": self._threads_dash_manifest(),
+            "children": [
+                {
+                    "video_versions": [
+                        {"url": "https://scontent.example/progressive.mp4", "height": 720}
+                    ]
+                }
+            ],
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        selected = next((item for item in resolved["candidates"] if item["kind"] == "progressive"), None)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["video_url"], "https://scontent.example/progressive.mp4")
+
+    def test_threads_quote_post_recursive_resolver(self):
+        post = {
+            "code": "Quote1",
+            "text_post_app_info": {
+                "share_info": {
+                    "quoted_post": {
+                        "video_versions": [
+                            {"url": "https://scontent.example/quoted.mp4", "height": 720}
+                        ]
+                    }
+                }
+            },
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(resolved["candidates"][0]["video_url"], "https://scontent.example/quoted.mp4")
+        self.assertIn("quoted_post", resolved["candidates"][0]["source_path"])
+        self.assertTrue(resolved["flags"]["quoted_post"])
+
+    def test_threads_repost_recursive_resolver(self):
+        post = {
+            "code": "Repost1",
+            "text_post_app_info": {
+                "share_info": {
+                    "reposted_post": {
+                        "video_versions": [
+                            {"url": "https://scontent.example/reposted.mp4", "height": 720}
+                        ]
+                    }
+                }
+            },
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(resolved["candidates"][0]["video_url"], "https://scontent.example/reposted.mp4")
+        self.assertTrue(resolved["flags"]["reposted_post"])
+
+    def test_threads_carousel_mixed_image_video(self):
+        post = {
+            "code": "Carousel1",
+            "carousel_media": [
+                {"media_type": 1, "image_versions2": {"candidates": [{"url": "https://img.example/a.jpg"}]}},
+                {
+                    "media_type": 2,
+                    "video_versions": [
+                        {"url": "https://scontent.example/carousel-video.mp4", "height": 1080}
+                    ],
+                },
+            ],
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(len(resolved["candidates"]), 1)
+        self.assertEqual(resolved["candidates"][0]["video_url"], "https://scontent.example/carousel-video.mp4")
+
+    def test_threads_nested_child_media_resolver(self):
+        post = {
+            "code": "Nested1",
+            "children": [
+                {
+                    "media_wrapper": {
+                        "child_media": {
+                            "video_versions": [
+                                {"url": "https://scontent.example/nested.mp4", "height": 540}
+                            ]
+                        }
+                    }
+                }
+            ],
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(resolved["candidates"][0]["video_url"], "https://scontent.example/nested.mp4")
+        self.assertIn("child_media", resolved["candidates"][0]["source_path"])
+
+    def test_threads_recommendation_isolation_inside_target_subtree(self):
+        post = {
+            "code": "TargetNoVideo",
+            "recommended_media": {
+                "video_versions": [
+                    {"url": "https://scontent.example/must-not-download.mp4", "height": 1080}
+                ]
+            },
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(resolved["candidates"], [])
+
+    def test_threads_duplicate_candidate_dedupe(self):
+        post = {
+            "code": "Dedupe1",
+            "video_versions": [
+                {"url": "https://scontent.example/same.mp4?sig=one", "height": 1080},
+                {"url": "https://scontent.example/same.mp4?sig=two", "height": 1080},
+            ],
+            "children": [
+                {
+                    "video_versions": [
+                        {"url": "https://scontent.example/same.mp4?sig=three", "height": 1080}
+                    ]
+                }
+            ],
+        }
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertEqual(len(resolved["candidates"]), 1)
+
+    def test_threads_recursive_loop_and_depth_protection(self):
+        post = {"code": "Loop1"}
+        post["children"] = [post]
+        resolved = DownloaderEngine.resolve_threads_media(post)
+        self.assertGreaterEqual(resolved["loop_skips"], 1)
+
+        deep = {"code": "Deep1"}
+        cursor = deep
+        for _ in range(30):
+            child = {}
+            cursor["children"] = [child]
+            cursor = child
+        deep_resolved = DownloaderEngine.resolve_threads_media(deep, max_depth=8)
+        self.assertTrue(deep_resolved["truncated"])
+
+    def test_threads_diagnostic_output_is_safe_and_structured(self):
+        page_data = {
+            "requested": {
+                "code": "Diag1",
+                "media_type": 8,
+                "carousel_media": [{"media_type": 1}],
+                "text_post_app_info": {"share_info": {"quoted_post": {"media_type": 1}}},
+            }
+        }
+        webpage = '<script type="application/json">' + json.dumps(page_data) + "</script>"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.read.return_value = webpage.encode("utf-8")
+
+        engine = DownloaderEngine()
+        with mock.patch.object(engine, "_threads_cookie_header", return_value="sessionid=secret-value"), mock.patch(
+            "downloader_engine.urllib.request.urlopen", return_value=response
+        ):
+            with self.assertRaisesRegex(ValueError, "post_id=Diag1") as raised:
+                engine._extract_threads_info("https://www.threads.com/@test/post/Diag1", "firefox")
+
+        self.assertNotIn("secret-value", str(raised.exception))
+        diagnostics = engine._last_threads_diagnostics
+        self.assertEqual(diagnostics["post_id"], "Diag1")
+        self.assertEqual(diagnostics["media_type"], 8)
+        self.assertEqual(diagnostics["carousel_count"], 1)
+        self.assertTrue(diagnostics["quoted_post_present"])
+        self.assertEqual(diagnostics["candidate_count"], 0)
+        self.assertGreater(len(diagnostics["resolver_paths_examined"]), 0)
+
+    def test_threads_dash_merge_uses_ffmpeg_copy(self):
+        engine = DownloaderEngine()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "video.mp4"
+            audio = root / "audio.m4a"
+            output = root / "merged.mp4"
+            video.write_bytes(b"video")
+            audio.write_bytes(b"audio")
+            with mock.patch("downloader_engine.subprocess.run") as run:
+                engine._merge_threads_dash(video, audio, output)
+        cmd = run.call_args.args[0]
+        self.assertIn("-c", cmd)
+        self.assertIn("copy", cmd)
+        self.assertIn(str(video), cmd)
+        self.assertIn(str(audio), cmd)
+        self.assertEqual(cmd[-1], str(output))
 
     def test_threads_cookie_loader_filters_non_threads_domains(self):
         fake_jar = [
