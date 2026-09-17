@@ -67,16 +67,21 @@ class TestVideoDownloader(unittest.TestCase):
             }
         }
 
-    def test_threads_authenticated_navigation_selects_requested_post(self):
+    @staticmethod
+    def _mock_page_response(page_data):
         webpage = (
             '<html><body><script type="application/json" data-sjs>'
-            + json.dumps(self._threads_page_data())
+            + json.dumps(page_data)
             + "</script></body></html>"
         )
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.__exit__.return_value = False
         response.read.return_value = webpage.encode("utf-8")
+        return response
+
+    def test_threads_authenticated_navigation_selects_requested_post(self):
+        response = self._mock_page_response(self._threads_page_data())
 
         engine = DownloaderEngine()
         with mock.patch.object(engine, "_threads_cookie_header", return_value="sessionid=abc"), mock.patch(
@@ -99,8 +104,121 @@ class TestVideoDownloader(unittest.TestCase):
         self.assertEqual(info["direct_video_url"], "https://scontent.example/target.mp4?sig=correct")
         self.assertNotIn("recommended.mp4", info["direct_video_url"])
         self.assertEqual(info["available_resolutions"], [1080])
-        self.assertEqual(info["raw_info"]["threads_parser"], "authenticated_browser_html")
+        self.assertEqual(info["raw_info"]["threads_parser"], "authenticated_recursive_media")
+        self.assertEqual(info["threads_stream_kind"], "progressive")
         self.assertTrue(info["raw_info"]["threads_authenticated"])
+
+    def test_threads_quote_post_resolves_nested_video(self):
+        page_data = {
+            "payload": {
+                "recommended": {
+                    "code": "OtherPost123",
+                    "video_versions": [{"url": "https://scontent.example/wrong.mp4"}],
+                },
+                "requested": {
+                    "code": "QuoteFacade1",
+                    "user": {"username": "outer_user"},
+                    "caption": {"text": "Quoted video"},
+                    "media_type": 1,
+                    "text_post_app_info": {
+                        "share_info": {
+                            "quoted_post": {
+                                "code": "QuotedSource1",
+                                "media_type": 2,
+                                "video_versions": [
+                                    {"url": "https://scontent.example/quoted.mp4?sig=ok", "height": 1080}
+                                ],
+                            }
+                        }
+                    },
+                },
+            }
+        }
+        response = self._mock_page_response(page_data)
+        engine = DownloaderEngine()
+        with mock.patch.object(engine, "_threads_cookie_header", return_value="sessionid=abc"), mock.patch(
+            "downloader_engine.urllib.request.urlopen", return_value=response
+        ):
+            info = engine._extract_threads_info(
+                "https://www.threads.com/@outer_user/post/QuoteFacade1",
+                "firefox",
+            )
+
+        self.assertEqual(info["id"], "QuoteFacade1")
+        self.assertEqual(info["direct_video_url"], "https://scontent.example/quoted.mp4?sig=ok")
+        self.assertNotIn("wrong.mp4", info["direct_video_url"])
+
+    def test_threads_repost_and_nested_wrapper_resolve_video(self):
+        post = {
+            "code": "RepostFacade1",
+            "text_post_app_info": {
+                "share_info": {
+                    "reposted_post": {
+                        "code": "RepostedSource1",
+                        "wrapper": {
+                            "children": [
+                                {
+                                    "media": {
+                                        "video_versions": [
+                                            {"url": "https://scontent.example/repost.mp4", "height": 720}
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                    }
+                }
+            },
+        }
+        urls = DownloaderEngine._threads_post_video_urls(post)
+        self.assertEqual(urls, ["https://scontent.example/repost.mp4"])
+
+    def test_threads_dash_only_manifest_selects_best_video_and_audio(self):
+        manifest = """
+        <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+          <Period>
+            <AdaptationSet mimeType="video/mp4" contentType="video">
+              <Representation id="v720" width="1280" height="720" bandwidth="1500000" codecs="avc1.64001f">
+                <BaseURL>https://scontent.example/video720.mp4?x=1&amp;y=2</BaseURL>
+              </Representation>
+              <Representation id="v1080" width="1920" height="1080" bandwidth="3000000" codecs="avc1.640028">
+                <BaseURL>https://scontent.example/video1080.mp4?x=1&amp;y=2</BaseURL>
+              </Representation>
+            </AdaptationSet>
+            <AdaptationSet mimeType="audio/mp4" contentType="audio">
+              <Representation id="a1" bandwidth="128000" codecs="mp4a.40.2">
+                <BaseURL>https://scontent.example/audio.mp4?x=1&amp;y=2</BaseURL>
+              </Representation>
+            </AdaptationSet>
+          </Period>
+        </MPD>
+        """
+        page_data = {
+            "payload": {
+                "requested": {
+                    "code": "DashOnly1",
+                    "user": {"username": "dash_user"},
+                    "caption": {"text": "DASH only"},
+                    "media_type": 2,
+                    "video_dash_manifest": manifest,
+                }
+            }
+        }
+        response = self._mock_page_response(page_data)
+        engine = DownloaderEngine()
+        with mock.patch.object(engine, "_threads_cookie_header", return_value="sessionid=abc"), mock.patch(
+            "downloader_engine.urllib.request.urlopen", return_value=response
+        ):
+            info = engine._extract_threads_info(
+                "https://www.threads.com/@dash_user/post/DashOnly1",
+                "firefox",
+            )
+
+        self.assertEqual(info["threads_stream_kind"], "dash")
+        self.assertEqual(info["direct_video_url"], "https://scontent.example/video1080.mp4?x=1&y=2")
+        self.assertEqual(info["direct_audio_url"], "https://scontent.example/audio.mp4?x=1&y=2")
+        self.assertIn(1080, info["available_resolutions"])
+        self.assertTrue(info["raw_info"]["threads_dash_audio"])
 
     def test_threads_escaped_payload_is_parsed(self):
         escaped_payload = json.dumps(json.dumps(self._threads_page_data()))
@@ -155,11 +273,7 @@ class TestVideoDownloader(unittest.TestCase):
                 "video_versions": [{"url": "https://scontent.example/recommended.mp4"}],
             }
         }
-        webpage = '<script type="application/json">' + json.dumps(page_data) + "</script>"
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.__exit__.return_value = False
-        response.read.return_value = webpage.encode("utf-8")
+        response = self._mock_page_response(page_data)
 
         engine = DownloaderEngine()
         with mock.patch.object(engine, "_threads_cookie_header", return_value="sessionid=abc"), mock.patch(
