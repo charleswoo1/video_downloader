@@ -86,3 +86,20 @@ jobs:
             throw "Standalone EXE was not created."
           }
           Get-Item $exe | Format-List Name,Length,LastWriteTime
+
+      - name: Resolve CI artifact name
+        id: artifact_name
+        shell: pwsh
+        run: |
+          $version = python -c "from version import __version__; print(__version__)"
+          "name=SocialVideoDownloader-CI-v$version-run-${{ github.run_number }}" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload standalone EXE artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact_name.outputs.name }}
+          path: dist/SocialVideoDownloader_Standalone.exe
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
