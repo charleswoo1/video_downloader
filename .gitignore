@@ -32,6 +32,7 @@ bin/
 
 # Local configuration & secrets
 config.json
+cookies.txt
 *.cookie
 *.cookies.txt
 *.log
